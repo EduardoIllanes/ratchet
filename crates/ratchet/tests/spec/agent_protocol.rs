@@ -53,6 +53,58 @@ fn agent_protocol__invalid_marker_is_logged_and_ignored() {
     );
 }
 
+// --- Requirement: Marker can be generated -----------------------------------------
+
+#[test]
+fn agent_protocol__init_writes_a_marker_at_the_repo_root() {
+    let sb = sandbox();
+    let root = sb.root();
+    fs::remove_file(root.join("ratchet.toml")).unwrap();
+    let deep = root.join("src/deep");
+    let out = cli(&sb, &["config", "init"], &deep, &[]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    let expected_path = root.join("ratchet.toml");
+    assert_eq!(
+        stdout(&out).trim(),
+        format!("wrote {}", expected_path.display())
+    );
+    assert_eq!(stderr(&out), "");
+    let text = fs::read_to_string(&expected_path).unwrap();
+    let parsed: toml::Value = toml::from_str(&text).unwrap();
+    assert_eq!(
+        parsed["repo"]["default_branch"].as_str(),
+        Some("main"),
+        "{text}"
+    );
+}
+
+#[test]
+fn agent_protocol__init_refuses_to_overwrite_without_force() {
+    let sb = sandbox();
+    let root = sb.root();
+    sb.write_marker("[repo]\ndefault_branch = \"sentinel\"\n");
+    let before = fs::read_to_string(root.join("ratchet.toml")).unwrap();
+    let out = cli(&sb, &["config", "init"], &root, &[]);
+    assert_eq!(code(&out), 1);
+    assert!(stderr(&out).contains("--force"), "{}", stderr(&out));
+    let after = fs::read_to_string(root.join("ratchet.toml")).unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn agent_protocol__init_outside_a_git_repo_fails() {
+    let sb = sandbox();
+    let dir = unmanaged_dir();
+    let out = cli(&sb, &["config", "init"], dir.path(), &[]);
+    assert_eq!(code(&out), 1);
+    assert!(
+        stderr(&out).contains("not a git repository"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!dir.path().join("ratchet.toml").exists());
+}
+
 // --- Requirement: Guardrails before the action -----------------------------------
 
 #[test]
