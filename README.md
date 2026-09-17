@@ -10,62 +10,28 @@ Status: v0.1.0 — groups 0-5 of the design spec are shipped (guardrails, state,
 
 ## Install
 
-The plugin is markdown plus hooks; the hooks call one binary, `ratchet`, which is **not**
-committed to this repo and is **not** downloaded automatically. You put it in place once.
+    claude plugin marketplace add EduardoIllanes/ratchet
+    claude plugin install ratchet@ratchet
 
-1. Add the marketplace and install the plugin:
+That is all. The plugin is markdown plus hooks; the hooks call one small binary, `ratchet`,
+which is not in this repo. The first time a hook runs it downloads the binary for your
+platform (macOS arm64/x64, Linux x64, Windows x64) from the release matching the plugin
+version, verifies its SHA-256 against the release's `SHA256SUMS.txt`, and puts it in the
+plugin's `bin/`. Takes a couple of seconds; nothing is installed anywhere else. Updating the
+plugin repeats this for the new version.
 
-       claude plugin marketplace add EduardoIllanes/ratchet
-       claude plugin install ratchet@ratchet
+If it cannot (offline, unsupported platform, checksum mismatch), the hook prints one line and
+exits 0; the session is not affected, and the hooks stay quiet for an hour before retrying.
+To retry now: `bash <plugin dir>/hooks/bootstrap.sh`. To install by hand: download the asset
+for your platform from https://github.com/EduardoIllanes/ratchet/releases, verify it against
+`SHA256SUMS.txt`, and unpack the single file it contains into `<plugin dir>/bin/`; or export
+`RATCHET_BIN=<path to a binary you built>`, which the hooks check first. The plugin dir is the
+`installPath` for `ratchet@ratchet` in `~/.claude/plugins/installed_plugins.json`.
 
-   Or, for a checkout of this repo, run Claude Code with `--plugin-dir /path/to/ratchet`.
-
-2. Get the binary for your platform from the release that matches the plugin version
-   (`.claude-plugin/plugin.json`; today `0.1.0`), from
-   https://github.com/EduardoIllanes/ratchet/releases:
-
-   | Platform | Asset |
-   |---|---|
-   | macOS Apple Silicon | `ratchet-0.1.0-aarch64-apple-darwin.tar.gz` |
-   | macOS Intel | `ratchet-0.1.0-x86_64-apple-darwin.tar.gz` |
-   | Linux x64 | `ratchet-0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
-   | Windows x64 | `ratchet-0.1.0-x86_64-pc-windows-msvc.zip` |
-
-   Verify it against `SHA256SUMS.txt` from the same release and unpack the single file it
-   contains. Then tell the hooks where it is. Two ways:
-
-   **a. `RATCHET_BIN` (recommended).** Keep the binary at a path of your own and export the
-   variable in the shell Claude Code starts from (`~/.zshrc`, `~/.bashrc`, or the Windows
-   user environment). The hooks check it first. This survives plugin updates. On macOS:
-
-       V=0.1.0; T=aarch64-apple-darwin
-       mkdir -p ~/.ratchet/bin && cd "$(mktemp -d)"
-       curl -sSLO https://github.com/EduardoIllanes/ratchet/releases/download/v$V/ratchet-$V-$T.tar.gz
-       curl -sSLO https://github.com/EduardoIllanes/ratchet/releases/download/v$V/SHA256SUMS.txt
-       shasum -a 256 --check --ignore-missing SHA256SUMS.txt
-       tar xzf ratchet-$V-$T.tar.gz && mv ratchet ~/.ratchet/bin/
-       echo 'export RATCHET_BIN="$HOME/.ratchet/bin/ratchet"' >> ~/.zshrc
-
-   (On Linux use `sha256sum --check --ignore-missing`; on Windows, `certutil -hashfile
-   ratchet-0.1.0-x86_64-pc-windows-msvc.zip SHA256` and compare by eye, unzip
-   `ratchet.exe` somewhere stable, and set `RATCHET_BIN` to its full path.)
-
-   **b. `bin/` of the installed plugin.** Claude Code installs each plugin version in its own
-   directory, so this has to be redone after every plugin update. The directory is the
-   `installPath` for `ratchet` in `~/.claude/plugins/installed_plugins.json`:
-
-       P="$(python3 -c 'import json,os;d=json.load(open(os.path.expanduser("~/.claude/plugins/installed_plugins.json")));print(d["plugins"]["ratchet@ratchet"][0]["installPath"])')"
-       mv ratchet "$P/bin/"
-
-   Until the binary is in place every hook prints one line, `[ratchet] binary not found …`,
-   and exits 0. Nothing is blocked and nothing is recorded.
-
-3. Restart the Claude Code session. In a repo you want governed, create `ratchet.toml` at its
-   root (see "Opt a repo in"). Check from that repo:
-
-       ratchet version                      # ratchet 0.1.0
-       ratchet guardrails list
-       ratchet guardrails test Bash '{"command":"python x.py"}'   # exit 2 if the repo has a .venv
+Then, in a repo you want governed, run `ratchet config init` at its root (or `/ratchet:init`
+from a Claude Code session) — see "Opt a repo in". Check: `ratchet version` prints
+`ratchet 0.1.0`, and `ratchet guardrails test Bash '{"command":"python x.py"}'` exits 2 when the
+repo has a `.venv`.
 
 ### Build from source
 
@@ -232,8 +198,7 @@ command; `--session <id>` attributes a write explicitly and is accepted anywhere
 
 ## Not here (yet)
 
-No automatic download of the binary: the hooks never fetch anything, by decision (spec §10
-D-no-bootstrap). Binaries are not code-signed or notarized; macOS Gatekeeper may ask once
+Binaries are not code-signed or notarized; macOS Gatekeeper may ask once
 (`xattr -d com.apple.quarantine bin/ratchet` clears it). No Linux arm64 build. The audited
 web-fetch flow (approval lists, robots.txt, cache) that the original group 3 plan would have
 ported is deliberately not planned for `ratchet` — it stays in `ops`.
