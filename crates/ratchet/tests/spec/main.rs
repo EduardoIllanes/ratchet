@@ -4,6 +4,7 @@
 
 mod agent_protocol;
 mod board;
+mod bootstrap;
 mod pdf;
 mod sessions;
 mod support;
