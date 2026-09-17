@@ -394,3 +394,45 @@ review by `reviewer`. No git on the owner's machine (D-roles).
 None blocking. Two the owner may revisit later: adding the agent runner as its own change,
 and whether `ratchet` should ship a generic local gate script. Web fetch with
 approval/robots/cache was removed from v1 on 2026-09-16 (owner); it stays in ops.
+
+## 10. Group 5 amendments (2026-09-17, owner)
+
+Decisions taken while planning group 5 (Release). Where they conflict with sections above,
+these win.
+
+**D-no-bootstrap — amends D-binary-delivery.** There is no `hooks/bootstrap.sh` and
+`run-hook.cmd` does not download anything. It keeps its current behaviour: use `RATCHET_BIN`
+if set, else `bin/ratchet[.exe]`, else print one stderr line and exit 0. Installation is
+manual and documented in the README: download the release asset for the platform, verify the
+checksum, unpack into `bin/`; or build from source. Rationale: a plugin that downloads and
+runs binaries on first use, or installs a Rust toolchain, is more invasive than the problem
+warrants; the release assets and a three-line README section cover the same need. Section 3
+layout and section 6 error handling read accordingly (`bootstrap.sh` removed; "failed
+bootstrap" is now just "missing binary").
+
+**D-release-assets.** GitHub releases are cut by a workflow triggered on tags `v*`. The
+workflow fails if the tag does not match `Cargo.toml`'s `version` and `plugin.json`'s
+`version`. Four targets: `x86_64-pc-windows-msvc`, `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`. One archive per target named
+`ratchet-<version>-<target>.tar.gz` (`.zip` on Windows) containing only the binary, plus one
+`SHA256SUMS.txt` covering all archives. `Cargo.toml` is the version's source of truth; a test
+asserts `plugin.json` matches it.
+
+**D-ci-gate.** `ci.yml` runs on push and pull request to `main` on Ubuntu, macOS and
+Windows: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
+The `latency` test is excluded from that gate and run in a separate step in release mode
+with `--nocapture` and `continue-on-error`: a report, not a gate. The 60 ms local ceiling
+stays as is.
+
+**D-check-scenarios-in-cargo — amends section 3 and section 7.** `scripts/check_scenarios.*`
+is not created. The check already exists as the integration test
+`crates/ratchet/tests/scenarios.rs` (`every_scenario_has_a_test`): it walks
+`openspec/specs/*/spec.md`, extracts every `#### Scenario:` heading outside fenced blocks,
+derives the slug, and fails listing every scenario that no file under
+`crates/ratchet/tests/spec/` references as `fn <spec>__<slug>(`. It is part of the gate by
+virtue of `cargo test`; group 5 adds nothing here beyond running it in CI.
+
+**Group 5 scope.** The two workflows, the version-match test, the README install rewrite plus
+the marketplace manifest, the deferred group-4 consistency pass of skills and agents against
+the CLI shipped by groups 2 and 3, and the `v0.1.0` release as the end-to-end proof. Out of
+scope: automatic bootstrap, `cargo install`, code signing or notarization, Linux arm64.
