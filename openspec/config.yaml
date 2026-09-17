@@ -1,0 +1,16 @@
+schema: spec-driven
+context: |
+  ratchet is a Claude Code plugin: a Rust binary driven by hooks, a task board in SQLite,
+  declarative guardrails and agent profiles. Specs describe behaviour, never code.
+rules:
+  proposal:
+    - One page maximum. Why, not how.
+  specs:
+    - Requirements use SHALL/MUST. Each requirement has at least one "#### Scenario:" with WHEN/THEN.
+    - Scenarios name no library, type or function.
+    - Every scenario of an active spec has a test in crates/ratchet/tests/spec that references it by slug.
+  design:
+    - Every decision names at least one discarded alternative and why it lost.
+  tasks:
+    - Each task fits one agent session and says how it is verified.
+    - The scenario-test task of a group comes before or with the implementation task, never after.

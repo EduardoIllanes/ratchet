@@ -1,0 +1,8 @@
+{
+  "name": "ratchet",
+  "version": "0.1.0",
+  "description": "Guardrails, task board and spec-driven agent roles for Claude Code, enforced by hooks instead of prompts.",
+  "author": { "name": "ratchet contributors" },
+  "license": "MIT",
+  "keywords": ["guardrails", "hooks", "tasks", "spec-driven", "agents"]
+}

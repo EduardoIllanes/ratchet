@@ -1,0 +1,41 @@
+# Built-in guardrails. Same schema for ~/.ratchet/guardrails.toml and a repo's extra file.
+# kind: command   -> regex over each command segment (split on ; && || | and newlines, outside quotes)
+#       file_path -> regex over tool_input.file_path (or notebook_path)
+#       content   -> regex over command + content + new_string (whatever will run or be written)
+#       main_tree -> write to a tracked file of the main tree, outside worktrees_dir
+# exempt: regex that, when it matches THE SAME SEGMENT, cancels the rule.
+# requires = "venv" -> rule applies only when the repo has a .venv.
+# Patterns are case-insensitive and multiline. Lookaround is supported.
+
+[[rules]]
+id = "python-venv"
+tools = ["Bash", "PowerShell"]
+kind = "command"
+pattern = '^\s*(env\s+)?(\w+=\S*\s+)*(python|python3|py|pip|pip3|pytest|uvicorn|mypy|ruff)(\.exe)?(\s|$)'
+exempt = '^\s*(env\s+)?(\w+=\S*\s+)*uv\s+run\b|\.venv[\\/](Scripts|bin)[\\/]'
+requires = "venv"
+message = "Python must run through the repo's virtualenv, not the global interpreter."
+alternative = "Prefix the command with `uv run` (e.g. `uv run python scripts/x.py`) or call the venv interpreter (`.venv/Scripts/python` or `.venv/bin/python`)."
+
+[[rules]]
+id = "git-destructive"
+tools = ["Bash", "PowerShell"]
+kind = "command"
+pattern = 'git\s+push\b(?![^;&|]*--force-with-lease)[^;&|]*(--force\b|\s-f\b)|git\s+reset\s+--hard|git\s+checkout\s+--\s+\.|git\s+clean\b[^;&|]*\s-[a-zA-Z]*f|^\s*rm(?=(?:.*\s)(?:-[a-zA-Z]*r[a-zA-Z]*|--recursive)(?:\s|$))(?=(?:.*\s)(?:-[a-zA-Z]*f[a-zA-Z]*|--force)(?:\s|$))'
+message = "Destructive git or file action: the owner runs it, not an agent."
+alternative = "Ask the owner to run it, or use a reversible alternative (git stash, git revert, move the files to the scratchpad)."
+
+[[rules]]
+id = "env-files"
+tools = ["Edit", "Write", "NotebookEdit", "MultiEdit", "PowerShell"]
+kind = "file_path"
+pattern = '(^|[\\/])\.env(\.[A-Za-z0-9_.-]+)?$'
+message = "`.env` files are never written by agents: they hold credentials."
+alternative = "Credentials live outside the repo; if a variable is missing, tell the owner."
+
+[[rules]]
+id = "main-tree"
+tools = ["Edit", "Write", "NotebookEdit", "MultiEdit"]
+kind = "main_tree"
+message = "Write to a tracked file in the repo's main tree."
+alternative = "Work in a worktree (`git worktree add <worktrees_dir>/<name> -b <branch>`) and edit there."
