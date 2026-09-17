@@ -20,10 +20,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -n "$RATCHET_BIN" ] && [ -x "$RATCHET_BIN" ]; then
     exec "$RATCHET_BIN" "$@"
 fi
-for candidate in "$ROOT/bin/ratchet" "$ROOT/bin/ratchet.exe"; do
-    if [ -x "$candidate" ]; then
-        exec "$candidate" "$@"
-    fi
-done
-echo "[ratchet] binary not found. Build it (cargo build --release) and copy target/release/ratchet[.exe] into $ROOT/bin/, or set RATCHET_BIN." >&2
+try_exec() {
+    for candidate in "$ROOT/bin/ratchet" "$ROOT/bin/ratchet.exe"; do
+        if [ -x "$candidate" ]; then
+            exec "$candidate" "$@"
+        fi
+    done
+}
+try_exec "$@"
+bash "$ROOT/hooks/bootstrap.sh" "$ROOT" </dev/null
+try_exec "$@"
+echo "[ratchet] binary not found. Bootstrap did not install it (see the line above, if any). Build from source (cargo build --release) and copy the binary into $ROOT/bin/, or set RATCHET_BIN." >&2
 exit 0

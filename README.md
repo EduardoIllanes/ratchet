@@ -4,13 +4,51 @@ A Claude Code plugin that turns working rules into things the agent cannot skip 
 prompt: guardrails before every tool call, a task board with checklists and mandatory
 handoffs, and separated agent roles (spec-test author, implementer, reviewer).
 
-Status: group 2 — the task board (CLI, briefing, prompt reminder, handoff rule, output discipline). See
+Status: v0.1.0 — groups 0-5 of the design spec are shipped (guardrails, state, task board,
+`ratchet pdf`, content, release). See
 `docs/superpowers/specs/2026-09-16-ratchet-plugin-design.md`.
 
-## Build from source (until releases exist)
+## Install
+
+    claude plugin marketplace add EduardoIllanes/ratchet
+    claude plugin install ratchet@ratchet
+
+That is all. The plugin is markdown plus hooks; the hooks call one small binary, `ratchet`,
+which is not in this repo. The first time a hook runs it downloads the binary for your
+platform (macOS arm64/x64, Linux x64, Windows x64) from the release matching the plugin
+version, verifies its SHA-256 against the release's `SHA256SUMS.txt`, and puts it in the
+plugin's `bin/`. Takes a couple of seconds; nothing is installed anywhere else. Updating the
+plugin repeats this for the new version.
+
+If it cannot (offline, unsupported platform, checksum mismatch), the hook prints one line and
+exits 0; the session is not affected, and the hooks stay quiet for an hour before retrying.
+To retry now: `bash <plugin dir>/hooks/bootstrap.sh`. To install by hand: download the asset
+for your platform from https://github.com/EduardoIllanes/ratchet/releases, verify it against
+`SHA256SUMS.txt`, and unpack the single file it contains into `<plugin dir>/bin/`; or export
+`RATCHET_BIN=<path to a binary you built>`, which the hooks check first. The plugin dir is the
+`installPath` for `ratchet@ratchet` in `~/.claude/plugins/installed_plugins.json`.
+
+Then, in a repo you want governed, run `ratchet config init` at its root (or `/ratchet:init`
+from a Claude Code session) — see "Opt a repo in". Check: `ratchet version` prints
+`ratchet 0.1.0`, and `ratchet guardrails test Bash '{"command":"python x.py"}'` exits 2 when the
+repo has a `.venv`.
+
+### Build from source
+
+With a Rust toolchain (1.79 or newer; on macOS also the Xcode Command Line Tools, on Windows
+the Visual Studio Build Tools, both for the bundled SQLite):
 
     cargo build --release
-    # copy target/release/ratchet (or ratchet.exe) into bin/
+    cp target/release/ratchet <plugin dir>/bin/     # ratchet.exe on Windows
+
+### Latency
+
+Measured `pre-tool` cost on Windows 11 (release build): about 11-13 ms of ratchet's own work
+above process-launch cost (full `pre-tool` runs ~53-56 ms in a direct harness against a ~40 ms
+do-nothing-binary floor on that machine). The check this replaces, in a Python harness, cost
+~830 ms. `cargo test -p ratchet --release --test latency -- --nocapture` prints the figures for
+your machine; the 60 ms ceiling in that test is a local sanity check and fails on slow
+launchers, which is why CI reports it without gating on it.
 
 ## Opt a repo in
 
@@ -33,26 +71,6 @@ Five agent profiles in `agents/`: `analyst`, `spec-test-author`, `implementer`, 
 local PDF). The OpenSpec skills (`openspec-propose`, `-apply-change`, `-update-change`,
 `-sync-specs`, `-archive-change`, `-explore`) and the `/opsx:*` commands are included as-is
 and need the `openspec` CLI installed separately.
-
-## Install (group 0, from source)
-
-1. `cargo build --release`
-2. Copy `target/release/ratchet` (Windows: `ratchet.exe`) into `bin/` of this plugin directory,
-   or export `RATCHET_BIN=<path>`.
-3. Install the plugin in Claude Code from this directory (marketplace entry or
-   `claude plugin add <path>`), then restart the session.
-4. In a repo you want governed: create `ratchet.toml` at its root (see above).
-5. Check: `ratchet guardrails list` from that repo, and
-   `ratchet guardrails test Bash '{"command":"python x.py"}'` should exit 2 when the repo has a `.venv`.
-
-Measured `pre-tool` latency on Windows 11 (release build): about 11-13 ms of ratchet's own
-work above process-launch cost (full `pre-tool` runs ~53-56 ms in a direct harness, ~66 ms
-through `cargo test`, against a ~40 ms do-nothing-binary floor on this machine). End-to-end
-wall clock is dominated by this machine's process-launch overhead, so the 60 ms ceiling in
-`cargo test -p ratchet --release --test latency` currently fails here even though the code's
-own work is well inside the design spec's 30 ms budget. The same check in the Python-based
-harness this replaces cost ~830 ms; exact figures for a given machine are printed by
-`cargo test -p ratchet --release --test latency -- --nocapture`.
 
 ## Guardrails
 
@@ -130,7 +148,7 @@ tested without sleeping.
 
 The `PreToolUse` guardrail hook still opens no database at all: it is the hot path. Its own
 work is the ~11-13 ms measured above; the wall-clock ceiling it is tested against fails on
-this machine for the process-launch reasons given there.
+this machine for the process-launch reasons given under *Latency*.
 
 ## The board
 
@@ -180,7 +198,7 @@ command; `--session <id>` attributes a write explicitly and is accepted anywhere
 
 ## Not here (yet)
 
-Release binaries and bootstrap (group 5). Group 4 content (agent profiles, skills, the OpenSpec
-commands, and `docs/agent-doctrine.md`) is present — see "Agents and skills" above. The audited
+Binaries are not code-signed or notarized; macOS Gatekeeper may ask once
+(`xattr -d com.apple.quarantine bin/ratchet` clears it). No Linux arm64 build. The audited
 web-fetch flow (approval lists, robots.txt, cache) that the original group 3 plan would have
 ported is deliberately not planned for `ratchet` — it stays in `ops`.

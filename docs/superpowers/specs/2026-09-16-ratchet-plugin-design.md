@@ -394,3 +394,74 @@ review by `reviewer`. No git on the owner's machine (D-roles).
 None blocking. Two the owner may revisit later: adding the agent runner as its own change,
 and whether `ratchet` should ship a generic local gate script. Web fetch with
 approval/robots/cache was removed from v1 on 2026-09-16 (owner); it stays in ops.
+
+## 10. Group 5 amendments (2026-09-17, owner)
+
+Decisions taken while planning group 5 (Release). Where they conflict with sections above,
+these win.
+
+**D-no-bootstrap — amends D-binary-delivery.** There is no `hooks/bootstrap.sh` and
+`run-hook.cmd` does not download anything. It keeps its current behaviour: use `RATCHET_BIN`
+if set, else `bin/ratchet[.exe]`, else print one stderr line and exit 0. Installation is
+manual and documented in the README: download the release asset for the platform, verify the
+checksum, unpack into `bin/`; or build from source. Rationale: a plugin that downloads and
+runs binaries on first use, or installs a Rust toolchain, is more invasive than the problem
+warrants; the release assets and a three-line README section cover the same need. Section 3
+layout and section 6 error handling read accordingly (`bootstrap.sh` removed; "failed
+bootstrap" is now just "missing binary").
+
+**D-release-assets.** GitHub releases are cut by a workflow triggered on tags `v*`. The
+workflow fails if the tag does not match `Cargo.toml`'s `version` and `plugin.json`'s
+`version`. Four targets: `x86_64-pc-windows-msvc`, `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`. One archive per target named
+`ratchet-<version>-<target>.tar.gz` (`.zip` on Windows) containing only the binary, plus one
+`SHA256SUMS.txt` covering all archives. `Cargo.toml` is the version's source of truth; a test
+asserts `plugin.json` matches it.
+
+**D-ci-gate.** `ci.yml` runs on push and pull request to `main` on Ubuntu, macOS and
+Windows: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
+The `latency` test is excluded from that gate and run in a separate step in release mode
+with `--nocapture` and `continue-on-error`: a report, not a gate. The 60 ms local ceiling
+stays as is.
+
+**D-check-scenarios-in-cargo — amends section 3 and section 7.** `scripts/check_scenarios.*`
+is not created. The check already exists as the integration test
+`crates/ratchet/tests/scenarios.rs` (`every_scenario_has_a_test`): it walks
+`openspec/specs/*/spec.md`, extracts every `#### Scenario:` heading outside fenced blocks,
+derives the slug, and fails listing every scenario that no file under
+`crates/ratchet/tests/spec/` references as `fn <spec>__<slug>(`. It is part of the gate by
+virtue of `cargo test`; group 5 adds nothing here beyond running it in CI.
+
+**Group 5 scope.** The two workflows, the version-match test, the README install rewrite plus
+the marketplace manifest, the deferred group-4 consistency pass of skills and agents against
+the CLI shipped by groups 2 and 3, and the `v0.1.0` release as the end-to-end proof. Out of
+scope: automatic bootstrap, `cargo install`, code signing or notarization, Linux arm64.
+
+**D-bootstrap-restored (2026-09-17, later the same day, owner) — reverses D-no-bootstrap.**
+The owner's criterion is "installing must be the simplest thing of all": adding the plugin
+must be enough. So D-binary-delivery stands as originally written: `hooks/run-hook.cmd`
+finds `bin/ratchet[.exe]`; if missing it runs `hooks/bootstrap.sh`, which downloads the
+release asset for this platform that matches `plugin.json`'s version, verifies it against the
+release's `SHA256SUMS.txt`, and unpacks it into `bin/`. Details fixed here:
+
+- Platform map: Darwin/arm64 → `aarch64-apple-darwin`, Darwin/x86_64 → `x86_64-apple-darwin`,
+  Linux/x86_64 → `x86_64-unknown-linux-gnu`, MINGW/MSYS/CYGWIN (Git Bash on Windows) →
+  `x86_64-pc-windows-msvc` (zip, `ratchet.exe`). Anything else: unsupported, one line, exit 0.
+- Download with `curl` (present on macOS, Git Bash and nearly every Linux), bounded by
+  `--max-time` so a hook never exceeds its timeout. Checksum with `shasum -a 256` or
+  `sha256sum`, whichever exists. A mismatch deletes the download and counts as a failure.
+- Failure (offline, 404, checksum, unsupported) → exit 0, one stderr line naming the manual
+  path (`bash <plugin>/hooks/bootstrap.sh` to retry, or place the binary in `bin/`, or set
+  `RATCHET_BIN`), plus a stamp file `bin/.bootstrap-failed`. While the stamp is younger than
+  60 minutes the hooks stay silent and do not retry (spec §6 "silent afterwards"); after that
+  one retry is allowed. The stamp is removed on success.
+- `RATCHET_RELEASE_BASE` overrides the download base URL (default
+  `https://github.com/EduardoIllanes/ratchet/releases/download/v<version>`); tests point it
+  at a local `file://` directory holding a fake archive and sums file. No test touches the
+  network.
+- `RATCHET_BIN` and `bin/` keep priority over bootstrap, so a developer's own binary is never
+  overwritten. Because each plugin version installs into its own directory, a plugin update
+  triggers a fresh bootstrap of the matching binary.
+- README Install collapses to the two `claude plugin` commands and one paragraph on what
+  happens on the first session and what to do if it fails. "Build from source" stays as the
+  alternative for platforms without an asset.

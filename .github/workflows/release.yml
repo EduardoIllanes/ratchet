@@ -1,0 +1,108 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-version:
+    name: tag matches Cargo.toml and plugin.json
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_v="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/ratchet/Cargo.toml | head -1)"
+          plugin_v="$(python3 -c 'import json;print(json.load(open(".claude-plugin/plugin.json"))["version"])')"
+          echo "tag=$tag cargo=$cargo_v plugin=$plugin_v"
+          if [ "$tag" != "$cargo_v" ] || [ "$tag" != "$plugin_v" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml ($cargo_v) and plugin.json ($plugin_v)"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: check-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, ext: tar.gz, bin: ratchet }
+          - { os: macos-latest,   target: aarch64-apple-darwin,     ext: tar.gz, bin: ratchet }
+          - { os: macos-latest,   target: x86_64-apple-darwin,      ext: tar.gz, bin: ratchet }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   ext: zip,    bin: ratchet.exe }
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: build
+        run: cargo build --release -p ratchet --target ${{ matrix.target }}
+      - name: smoke
+        shell: bash
+        run: |
+          # The x86_64 macOS binary is cross-built on an arm64 runner; Rosetta runs it there.
+          out="$(target/${{ matrix.target }}/release/${{ matrix.bin }} version)"
+          echo "$out"
+          [ "$out" = "ratchet $VERSION" ]
+      - name: package (unix)
+        if: matrix.ext == 'tar.gz'
+        shell: bash
+        run: |
+          name="ratchet-$VERSION-${{ matrix.target }}"
+          tar -C "target/${{ matrix.target }}/release" -czf "$name.tar.gz" ratchet
+          ls -l "$name.tar.gz"
+      - name: package (windows)
+        if: matrix.ext == 'zip'
+        shell: pwsh
+        run: |
+          $name = "ratchet-$env:VERSION-${{ matrix.target }}"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/ratchet.exe" -DestinationPath "$name.zip"
+          Get-Item "$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ratchet-${{ env.VERSION }}-${{ matrix.target }}
+          path: ratchet-${{ env.VERSION }}-${{ matrix.target }}.${{ matrix.ext }}
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        shell: bash
+        run: |
+          cd dist
+          ls -l
+          sha256sum ratchet-*.tar.gz ratchet-*.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ratchet ${{ needs.check-version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/ratchet-*.tar.gz
+            dist/ratchet-*.zip
+            dist/SHA256SUMS.txt
