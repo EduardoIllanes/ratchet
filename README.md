@@ -283,6 +283,7 @@ ported is deliberately not planned for `ratchet` — it stays in `ops`.
 
 ## Status
 
-v0.1.0 — groups 0-5 of the design spec are shipped (guardrails, state, task board,
-`ratchet pdf`, content, release). Design: `docs/superpowers/specs/2026-09-16-ratchet-plugin-design.md`.
+v0.1.1 — groups 0-5 of the design spec are shipped (guardrails, state, task board,
+`ratchet pdf`, content, release). v0.1.1 fixes the hook scripts' missing exec bit, which
+made every hook fail with "Permission denied" on a fresh v0.1.0 install. Design: `docs/superpowers/specs/2026-09-16-ratchet-plugin-design.md`.
 Agent doctrine: `docs/agent-doctrine.md`.
