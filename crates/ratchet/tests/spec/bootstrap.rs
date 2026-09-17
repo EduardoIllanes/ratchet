@@ -335,6 +335,33 @@ fn bootstrap__unsupported_platform_is_reported_once() {
     assert!(err.contains("unsupported platform"), "{err}");
     assert!(stamp_path(root).exists());
     assert!(!installed_bin_path(root).exists());
+
+    // A second run within 60 minutes must be silenced by the stamp, exactly like any other
+    // failure kind: the unsupported-platform check must never outrun the stamp check.
+    let second = run_wrapper(
+        root,
+        &["version"],
+        &[
+            ("RATCHET_OS", "Plan9"),
+            ("RATCHET_RELEASE_BASE", &file_url(release.path())),
+        ],
+    );
+    assert_eq!(code(&second), 0);
+    let err2 = stderr(&second);
+    let lines: Vec<&str> = err2.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected exactly one stderr line on the second run: {err2}"
+    );
+    assert!(
+        lines[0].contains("Bootstrap did not install it"),
+        "expected the wrapper's own not-found line, got: {err2}"
+    );
+    assert!(
+        !err2.contains("[ratchet] bootstrap failed"),
+        "no bootstrap line expected while the stamp is young: {err2}"
+    );
 }
 
 #[test]
