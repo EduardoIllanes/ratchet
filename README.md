@@ -182,7 +182,7 @@ tested without sleeping.
 
 The `PreToolUse` guardrail hook still opens no database at all: it is the hot path. Its own
 work is the ~11-13 ms measured above; the wall-clock ceiling it is tested against fails on
-this machine for the process-launch reasons given there.
+this machine for the process-launch reasons given under *Latency*.
 
 ## The board
 

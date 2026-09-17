@@ -1,6 +1,6 @@
 ---
 name: ratchet-tasks
-description: How to work the ratchet task board from a Claude Code session — look before claiming, claim, advance by checklist, leave notes, and write a handoff that the next session can act on. Use when the `[ratchet]` briefing appears at session start or when the Stop hook asks for a handoff.
+description: How to work the `ratchet task list` board from a Claude Code session — look before claiming, claim, advance by checklist, leave notes, and write a handoff that the next session can act on. Use when the `[ratchet]` briefing appears at session start or when the Stop hook asks for a handoff.
 ---
 
 # Tasks in a ratchet session
