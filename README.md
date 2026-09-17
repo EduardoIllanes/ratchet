@@ -98,7 +98,6 @@ the session without recording anything is refused once.
 
 ## Opt a repo in
 
-
 Run `ratchet config init` at the repo root (or `/ratchet:init` from a Claude Code session), which writes this file with comments:
 
     [repo]
