@@ -88,21 +88,31 @@ else
     fail "no sha256 tool"
 fi
 
-# 5. Download into a temp dir, always removed on exit.
+# 5. Mark an attempt in progress before downloading anything: two sequential downloads can
+# take longer than a hook's own timeout, and a hard kill mid-download skips fail() entirely.
+# Touching the stamp here first means 60 minutes of silence still follow even then.
+mkdir -p "$root/bin"
+touch "$stamp"
+
+# Download into a temp dir, always removed on exit. SHA256SUMS.txt is small and fetched first,
+# with a tight budget, so a slow or hanging host fails fast; the asset gets the larger share of
+# the remaining time.
 tmp="$(mktemp -d 2>/dev/null)"
 if [ -z "${tmp:-}" ] || [ ! -d "$tmp" ]; then
     fail "download failed ($asset)"
 fi
 trap 'rm -rf "$tmp"' EXIT
 
-if ! curl -fsSL --connect-timeout 3 --max-time 8 -o "$tmp/$asset" "$base/$asset" 2>/dev/null; then
-    fail "download failed ($asset)"
-fi
-if ! curl -fsSL --connect-timeout 3 --max-time 8 -o "$tmp/SHA256SUMS.txt" "$base/SHA256SUMS.txt" 2>/dev/null; then
+if ! curl -fsSL --connect-timeout 2 --max-time 2 -o "$tmp/SHA256SUMS.txt" "$base/SHA256SUMS.txt" 2>/dev/null; then
     fail "download failed (SHA256SUMS.txt)"
 fi
+if ! curl -fsSL --connect-timeout 2 --max-time 6 -o "$tmp/$asset" "$base/$asset" 2>/dev/null; then
+    fail "download failed ($asset)"
+fi
 
-# 6. Verify the checksum, case-insensitively.
+# 6. Verify the checksum, case-insensitively. The release workflow writes SHA256SUMS.txt in
+# text mode ("<hash>  <name>", two spaces, no leading "*"), which is what this awk lookup
+# expects.
 expected="$(awk -v a="$asset" '$NF==a {print $1}' "$tmp/SHA256SUMS.txt" 2>/dev/null | head -1)"
 if [ -z "${expected:-}" ]; then
     fail "no checksum for $asset"
@@ -135,14 +145,19 @@ if [ "$entry_count" -ne 1 ] || [ ! -f "$extract_dir/$bin" ]; then
     fail "unexpected archive layout"
 fi
 
-# 8. Install: move into place via a temp name in the same directory, then an atomic rename.
+# 8. Install: stage into bin/ under a temp name, chmod it there, then rename atomically into
+# place, checking every step.
 mkdir -p "$root/bin"
 tmp_name="$root/bin/.$bin.$$"
 if ! mv -f "$extract_dir/$bin" "$tmp_name" 2>/dev/null; then
-    fail "unexpected archive layout"
+    fail "install failed (stage)"
 fi
-mv -f "$tmp_name" "$root/bin/$bin"
-chmod +x "$root/bin/$bin"
+if ! chmod +x "$tmp_name" 2>/dev/null; then
+    fail "install failed (chmod)"
+fi
+if ! mv -f "$tmp_name" "$root/bin/$bin" 2>/dev/null; then
+    fail "install failed (rename)"
+fi
 rm -f "$stamp"
 printf '[ratchet] installed ratchet %s (%s) into %s/bin/\n' "$version" "$target" "$root" 1>&2
 exit 0
