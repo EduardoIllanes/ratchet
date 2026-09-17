@@ -121,12 +121,16 @@ fn sha256_file(path: &Path) -> String {
     }
 }
 
-/// Builds `ratchet-<version>-<target>.<ext>` (containing only the real test binary, renamed to
-/// `bin_name()`) plus `SHA256SUMS.txt` inside `dir`. `good_hash = false` writes 64 zeros for the
-/// asset's checksum instead of the real one, so the wrapper refuses it.
-fn fake_release(dir: &Path, version: &str, target: &str, good_hash: bool) {
+/// The release asset's file name for `version`/`target` on the current host.
+fn asset_name(version: &str, target: &str) -> String {
+    format!("ratchet-{version}-{target}.{}", ext_name())
+}
+
+/// Builds `ratchet-<version>-<target>.<ext>` inside `dir` (containing only the real test binary,
+/// renamed to `bin_name()`), without writing `SHA256SUMS.txt`. Returns the asset's file name.
+fn build_asset(dir: &Path, version: &str, target: &str) -> String {
     fs::create_dir_all(dir).unwrap();
-    let asset = format!("ratchet-{version}-{target}.{}", ext_name());
+    let asset = asset_name(version, target);
     let asset_path = dir.join(&asset);
 
     let stage = TempDir::new().unwrap();
@@ -163,6 +167,14 @@ fn fake_release(dir: &Path, version: &str, target: &str, good_hash: bool) {
         assert!(status.success(), "tar -czf failed");
     }
 
+    asset
+}
+
+/// Builds the release asset plus `SHA256SUMS.txt` inside `dir`. `good_hash = false` writes 64
+/// zeros for the asset's checksum instead of the real one, so the wrapper refuses it.
+fn fake_release(dir: &Path, version: &str, target: &str, good_hash: bool) {
+    let asset = build_asset(dir, version, target);
+    let asset_path = dir.join(&asset);
     let real_hash = sha256_file(&asset_path);
     let hash = if good_hash { real_hash } else { "0".repeat(64) };
     fs::write(dir.join("SHA256SUMS.txt"), format!("{hash}  {asset}\n")).unwrap();
@@ -220,6 +232,25 @@ fn run_wrapper(root: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
     cmd.output().unwrap()
 }
 
+/// Runs `hooks/bootstrap.sh` directly (not through the wrapper), to check its own stderr
+/// contract in isolation: exactly one line on success, exactly one on failure (or none, while
+/// the stamp is young). The wrapper's combined stderr additionally carries its own mandated
+/// "binary not found ... see the line above, if any" line whenever nothing ends up installed,
+/// so "exactly one line" is only ever true of bootstrap.sh's own output, not the wrapper's.
+fn run_bootstrap(root: &Path, envs: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new("bash");
+    cmd.arg(root.join("hooks/bootstrap.sh"))
+        .arg(root)
+        .env_remove("RATCHET_BIN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.output().unwrap()
+}
+
 #[test]
 fn bootstrap__first_run_downloads_verifies_and_runs_the_binary() {
     let plugin = fake_plugin("0.1.0");
@@ -261,6 +292,18 @@ fn bootstrap__checksum_mismatch_refuses_the_download() {
     assert!(err.contains("checksum mismatch"), "{err}");
     assert!(!installed_bin_path(root).exists());
     assert!(stamp_path(root).exists());
+    fs::remove_file(stamp_path(root)).unwrap();
+
+    // bootstrap.sh's own stderr contract ("on failure exactly one line") checked directly.
+    let direct = run_bootstrap(root, &[("RATCHET_RELEASE_BASE", &file_url(release.path()))]);
+    assert_eq!(code(&direct), 1);
+    let derr = stderr(&direct);
+    assert_eq!(
+        derr.lines().count(),
+        1,
+        "expected exactly one stderr line from bootstrap.sh itself: {derr}"
+    );
+    assert!(derr.contains("checksum mismatch"), "{derr}");
 }
 
 #[test]
@@ -395,19 +438,99 @@ fn bootstrap__an_existing_binary_is_never_re_downloaded() {
 fn bootstrap__download_failure_names_the_manual_path() {
     let plugin = fake_plugin("0.1.0");
     let root = plugin.path();
-    // An existing, empty directory: no asset there to download.
-    let release = TempDir::new().unwrap();
 
-    let out = run_wrapper(
-        root,
-        &["version"],
-        &[("RATCHET_RELEASE_BASE", &file_url(release.path()))],
-    );
-
+    // Run 1: an existing, empty directory — no asset, no sums. The scenario's literal WHEN
+    // ("a directory without the asset"). After the I1a reorder this fails on SHA256SUMS.txt
+    // first, so the assertion stays generic ("download failed", not naming a specific file).
+    let empty_release = TempDir::new().unwrap();
+    let empty_base = file_url(empty_release.path());
+    let out = run_wrapper(root, &["version"], &[("RATCHET_RELEASE_BASE", &empty_base)]);
     assert_eq!(code(&out), 0);
     let err = stderr(&out);
     assert!(err.contains("download failed"), "{err}");
     assert!(err.contains("RATCHET_BIN"), "{err}");
     assert!(stamp_path(root).exists());
     assert!(!installed_bin_path(root).exists());
+    fs::remove_file(stamp_path(root)).unwrap();
+
+    // bootstrap.sh's own stderr contract ("on failure exactly one line") checked directly.
+    let direct1 = run_bootstrap(root, &[("RATCHET_RELEASE_BASE", &empty_base)]);
+    assert_eq!(code(&direct1), 1);
+    let derr1 = stderr(&direct1);
+    assert_eq!(
+        derr1.lines().count(),
+        1,
+        "expected exactly one stderr line from bootstrap.sh itself: {derr1}"
+    );
+    assert!(derr1.contains("download failed"), "{derr1}");
+    fs::remove_file(stamp_path(root)).unwrap();
+
+    // Run 2: SHA256SUMS.txt present, the asset missing — SHA256SUMS.txt is fetched first (I1a),
+    // succeeds, and the failure still correctly names the asset it could not then download.
+    let sums_only = TempDir::new().unwrap();
+    let name = asset_name("0.1.0", host_target());
+    fs::write(
+        sums_only.path().join("SHA256SUMS.txt"),
+        format!("{}  {name}\n", "0".repeat(64)),
+    )
+    .unwrap();
+    let sums_only_base = file_url(sums_only.path());
+    let out2 = run_wrapper(
+        root,
+        &["version"],
+        &[("RATCHET_RELEASE_BASE", &sums_only_base)],
+    );
+    assert_eq!(code(&out2), 0);
+    let err2 = stderr(&out2);
+    assert!(
+        err2.contains(&format!("download failed ({name})")),
+        "{err2}"
+    );
+    assert!(stamp_path(root).exists());
+    assert!(!installed_bin_path(root).exists());
+    fs::remove_file(stamp_path(root)).unwrap();
+
+    let direct2 = run_bootstrap(root, &[("RATCHET_RELEASE_BASE", &sums_only_base)]);
+    assert_eq!(code(&direct2), 1);
+    let derr2 = stderr(&direct2);
+    assert_eq!(
+        derr2.lines().count(),
+        1,
+        "expected exactly one stderr line from bootstrap.sh itself: {derr2}"
+    );
+    assert!(
+        derr2.contains(&format!("download failed ({name})")),
+        "{derr2}"
+    );
+    fs::remove_file(stamp_path(root)).unwrap();
+
+    // Run 3: the asset present, SHA256SUMS.txt missing — SHA256SUMS.txt is fetched first (I1a)
+    // and fails there, before the asset is ever requested.
+    let asset_only = TempDir::new().unwrap();
+    build_asset(asset_only.path(), "0.1.0", host_target());
+    let asset_only_base = file_url(asset_only.path());
+    let out3 = run_wrapper(
+        root,
+        &["version"],
+        &[("RATCHET_RELEASE_BASE", &asset_only_base)],
+    );
+    assert_eq!(code(&out3), 0);
+    let err3 = stderr(&out3);
+    assert!(err3.contains("download failed (SHA256SUMS.txt)"), "{err3}");
+    assert!(stamp_path(root).exists());
+    assert!(!installed_bin_path(root).exists());
+    fs::remove_file(stamp_path(root)).unwrap();
+
+    let direct3 = run_bootstrap(root, &[("RATCHET_RELEASE_BASE", &asset_only_base)]);
+    assert_eq!(code(&direct3), 1);
+    let derr3 = stderr(&direct3);
+    assert_eq!(
+        derr3.lines().count(),
+        1,
+        "expected exactly one stderr line from bootstrap.sh itself: {derr3}"
+    );
+    assert!(
+        derr3.contains("download failed (SHA256SUMS.txt)"),
+        "{derr3}"
+    );
 }
