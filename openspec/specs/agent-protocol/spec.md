@@ -30,6 +30,23 @@ any other file. An unreadable or invalid marker SHALL be logged and treated as "
 - **WHEN** `ratchet.toml` is not valid TOML and the tool call is `python scripts/x.py`
 - **THEN** the hook exits 0 and the log file contains one line naming `ratchet.toml`
 
+### Requirement: Marker can be generated
+`ratchet config init` SHALL write a commented `ratchet.toml` at the root of the git repository
+containing the current directory, and SHALL refuse to overwrite an existing marker unless
+`--force` is given. The generated file SHALL be valid for the hooks as written.
+
+#### Scenario: Init writes a marker at the repo root
+- **WHEN** `ratchet config init` runs from a subdirectory of a git repo with no `ratchet.toml`
+- **THEN** it exits 0, prints `wrote <root>/ratchet.toml`, and the file parses with `default_branch = "main"`
+
+#### Scenario: Init refuses to overwrite without force
+- **WHEN** `ratchet config init` runs in a repo that already has a `ratchet.toml`
+- **THEN** it exits 1, the file is unchanged, and stderr mentions `--force`
+
+#### Scenario: Init outside a git repo fails
+- **WHEN** `ratchet config init` runs in a directory that is not inside a git repository
+- **THEN** it exits 1 and stderr says `not a git repository`
+
 ### Requirement: Guardrails before the action
 In PreToolUse inside an opted-in repo, ratchet SHALL block, with a message that states the
 rule and the alternative, prefixed `[ratchet guardrail:<id>]`: (a) `python`, `pip`,

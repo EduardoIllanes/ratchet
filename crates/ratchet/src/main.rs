@@ -47,6 +47,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DbCmd,
     },
+    /// Repo marker: `init` writes a commented ratchet.toml at the repo root.
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
     /// Print the version.
     Version,
     /// Agent sessions: `list`, `show`.
@@ -90,6 +95,16 @@ enum DbCmd {
     Path,
     /// Print one line proving the bundled SQLite is linked and executes SQL.
     Selftest,
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Write ratchet.toml at the root of the current git repo.
+    Init {
+        /// Overwrite an existing file.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,6 +268,12 @@ fn main() {
             DbCmd::Migrate => cli::db_cmd::migrate(&env),
             DbCmd::Path => cli::db_cmd::path(&env),
             DbCmd::Selftest => cli::db_cmd::selftest(),
+        },
+        Cmd::Config { cmd } => match cmd {
+            ConfigCmd::Init { force } => cli::config_cmd::init(
+                force,
+                cwd.as_deref().unwrap_or_else(|| std::path::Path::new(".")),
+            ),
         },
         Cmd::Session { cmd } => match cmd {
             SessionCmd::List { repo, live, json } => {

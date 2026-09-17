@@ -14,7 +14,7 @@ Status: group 2 — the task board (CLI, briefing, prompt reminder, handoff rule
 
 ## Opt a repo in
 
-Create `ratchet.toml` at the repo root (there is no generator yet; the template is in this section):
+Run `ratchet config init` at the repo root (or `/ratchet:init` from a Claude Code session), which writes this file with comments:
 
     [repo]
     default_branch = "main"
