@@ -37,9 +37,16 @@ version, verifies its SHA-256 against the release's `SHA256SUMS.txt`, and puts i
 plugin's `bin/`. No Rust, no PATH changes, nothing installed anywhere else. Updating the plugin
 repeats this for the new version.
 
-Then opt a repo in, from its root:
+Then opt a repo in. Open a Claude Code session at its root and run:
 
-    ratchet config init          # or /ratchet:init from a Claude Code session
+    /ratchet:init
+
+`ratchet` is not on your shell's PATH: the binary lives only in the plugin's `bin/`, and Claude
+Code adds that directory to the PATH of its own sessions. So every `ratchet ...` command in this
+README runs inside a session, either through the `!` prefix (`! ratchet task list`) or by
+letting the agent run it. To use it from a terminal, put that `bin/` on your PATH or link the
+binary, for example `ln -s "<plugin dir>/bin/ratchet" ~/.local/bin/ratchet`; the link breaks
+when the plugin updates to a new version, because the plugin dir contains the version.
 
 If the download cannot happen (offline, unsupported platform, checksum mismatch), the hook
 prints one line and exits 0; the session is not affected, and the hooks stay quiet for an hour
@@ -52,7 +59,7 @@ first. The plugin dir is the `installPath` for `ratchet@ratchet` in
 
 ## Quick tour
 
-Real output from a throwaway repo. Opt it in:
+Real output from a throwaway repo, run from inside a Claude Code session (`!` prefix). Opt it in:
 
     $ ratchet config init
     wrote /tmp/demo/ratchet.toml
@@ -98,7 +105,7 @@ the session without recording anything is refused once.
 
 ## Opt a repo in
 
-Run `ratchet config init` at the repo root (or `/ratchet:init` from a Claude Code session), which writes this file with comments:
+Run `/ratchet:init` from a Claude Code session at the repo root (or `ratchet config init` where the binary is on your PATH, see *Quick install*), which writes this file with comments:
 
     [repo]
     default_branch = "main"
