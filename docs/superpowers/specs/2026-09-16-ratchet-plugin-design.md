@@ -436,3 +436,32 @@ virtue of `cargo test`; group 5 adds nothing here beyond running it in CI.
 the marketplace manifest, the deferred group-4 consistency pass of skills and agents against
 the CLI shipped by groups 2 and 3, and the `v0.1.0` release as the end-to-end proof. Out of
 scope: automatic bootstrap, `cargo install`, code signing or notarization, Linux arm64.
+
+**D-bootstrap-restored (2026-09-17, later the same day, owner) — reverses D-no-bootstrap.**
+The owner's criterion is "installing must be the simplest thing of all": adding the plugin
+must be enough. So D-binary-delivery stands as originally written: `hooks/run-hook.cmd`
+finds `bin/ratchet[.exe]`; if missing it runs `hooks/bootstrap.sh`, which downloads the
+release asset for this platform that matches `plugin.json`'s version, verifies it against the
+release's `SHA256SUMS.txt`, and unpacks it into `bin/`. Details fixed here:
+
+- Platform map: Darwin/arm64 → `aarch64-apple-darwin`, Darwin/x86_64 → `x86_64-apple-darwin`,
+  Linux/x86_64 → `x86_64-unknown-linux-gnu`, MINGW/MSYS/CYGWIN (Git Bash on Windows) →
+  `x86_64-pc-windows-msvc` (zip, `ratchet.exe`). Anything else: unsupported, one line, exit 0.
+- Download with `curl` (present on macOS, Git Bash and nearly every Linux), bounded by
+  `--max-time` so a hook never exceeds its timeout. Checksum with `shasum -a 256` or
+  `sha256sum`, whichever exists. A mismatch deletes the download and counts as a failure.
+- Failure (offline, 404, checksum, unsupported) → exit 0, one stderr line naming the manual
+  path (`bash <plugin>/hooks/bootstrap.sh` to retry, or place the binary in `bin/`, or set
+  `RATCHET_BIN`), plus a stamp file `bin/.bootstrap-failed`. While the stamp is younger than
+  60 minutes the hooks stay silent and do not retry (spec §6 "silent afterwards"); after that
+  one retry is allowed. The stamp is removed on success.
+- `RATCHET_RELEASE_BASE` overrides the download base URL (default
+  `https://github.com/EduardoIllanes/ratchet/releases/download/v<version>`); tests point it
+  at a local `file://` directory holding a fake archive and sums file. No test touches the
+  network.
+- `RATCHET_BIN` and `bin/` keep priority over bootstrap, so a developer's own binary is never
+  overwritten. Because each plugin version installs into its own directory, a plugin update
+  triggers a fresh bootstrap of the matching binary.
+- README Install collapses to the two `claude plugin` commands and one paragraph on what
+  happens on the first session and what to do if it fails. "Build from source" stays as the
+  alternative for platforms without an asset.
