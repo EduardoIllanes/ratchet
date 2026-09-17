@@ -1,7 +1,7 @@
 : << 'CMDBLOCK'
 @echo off
-REM Cross-platform wrapper. Claude Code invokes this with shell=bash on every platform;
-REM cmd.exe only reaches the batch part if someone runs it by hand on Windows.
+REM Cross-platform wrapper. On macOS/Linux Claude Code runs the command line through /bin/sh,
+REM which needs the exec bit on this file (kept in git as 100755); cmd.exe reaches the batch part on Windows.
 set "HOOK_DIR=%~dp0"
 if exist "C:\Program Files\Git\bin\bash.exe" (
     "C:\Program Files\Git\bin\bash.exe" "%HOOK_DIR%run-hook.cmd" %*
