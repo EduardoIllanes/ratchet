@@ -34,7 +34,8 @@ silent for 60 minutes. An existing binary SHALL never be replaced by bootstrap.
 
 #### Scenario: Unsupported platform is reported once
 - **WHEN** `RATCHET_OS=Plan9` and `bin/` is empty
-- **THEN** the wrapper exits 0, stderr contains `unsupported platform`, and the stamp exists
+- **THEN** the wrapper exits 0, stderr contains `unsupported platform`, and the stamp exists; and
+  a second run within 60 minutes prints only the wrapper's not-found line, with no bootstrap line
 
 #### Scenario: An existing binary is never re-downloaded
 - **WHEN** `bin/` already holds the binary and `RATCHET_RELEASE_BASE` points at a directory that does not exist

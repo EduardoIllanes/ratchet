@@ -25,6 +25,17 @@ fail() {
     exit 1
 }
 
+# 0. Stamp: while younger than 60 minutes, stay completely silent and do not retry — checked
+# before any other step so every failure kind (including a platform that will never resolve, or
+# a plugin.json that can never be read) honours the 60-minute silence, not just download and
+# checksum failures.
+if [ -f "$stamp" ]; then
+    if [ -n "$(find "$stamp" -mmin -60 2>/dev/null)" ]; then
+        exit 1
+    fi
+    rm -f "$stamp"
+fi
+
 # 1. Version, from plugin.json.
 version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" 2>/dev/null | head -1)"
 if [ -z "${version:-}" ]; then
@@ -60,20 +71,12 @@ case "$os" in
         ;;
 esac
 
-# 3. Stamp: while younger than 60 minutes, stay completely silent and do not retry.
-if [ -f "$stamp" ]; then
-    if [ -n "$(find "$stamp" -mmin -60 2>/dev/null)" ]; then
-        exit 1
-    fi
-    rm -f "$stamp"
-fi
-
-# 4. Base URL and asset name.
+# 3. Base URL and asset name.
 base="${RATCHET_RELEASE_BASE:-https://github.com/EduardoIllanes/ratchet/releases/download/v$version}"
 asset="ratchet-$version-$target.$ext"
 asset_hint="$asset"
 
-# 5. Tools.
+# 4. Tools.
 if ! command -v curl >/dev/null 2>&1; then
     fail "curl not found"
 fi
@@ -85,7 +88,7 @@ else
     fail "no sha256 tool"
 fi
 
-# 6. Download into a temp dir, always removed on exit.
+# 5. Download into a temp dir, always removed on exit.
 tmp="$(mktemp -d 2>/dev/null)"
 if [ -z "${tmp:-}" ] || [ ! -d "$tmp" ]; then
     fail "download failed ($asset)"
@@ -99,7 +102,7 @@ if ! curl -fsSL --connect-timeout 3 --max-time 8 -o "$tmp/SHA256SUMS.txt" "$base
     fail "download failed (SHA256SUMS.txt)"
 fi
 
-# 7. Verify the checksum, case-insensitively.
+# 6. Verify the checksum, case-insensitively.
 expected="$(awk -v a="$asset" '$NF==a {print $1}' "$tmp/SHA256SUMS.txt" 2>/dev/null | head -1)"
 if [ -z "${expected:-}" ]; then
     fail "no checksum for $asset"
@@ -111,7 +114,7 @@ if [ "$expected_lc" != "$actual_lc" ]; then
     fail "checksum mismatch for $asset"
 fi
 
-# 8. Unpack into a dedicated subdir; the archive must yield exactly one file, $bin.
+# 7. Unpack into a dedicated subdir; the archive must yield exactly one file, $bin.
 extract_dir="$tmp/extract"
 mkdir -p "$extract_dir"
 case "$ext" in
@@ -132,7 +135,7 @@ if [ "$entry_count" -ne 1 ] || [ ! -f "$extract_dir/$bin" ]; then
     fail "unexpected archive layout"
 fi
 
-# 9. Install: move into place via a temp name in the same directory, then an atomic rename.
+# 8. Install: move into place via a temp name in the same directory, then an atomic rename.
 mkdir -p "$root/bin"
 tmp_name="$root/bin/.$bin.$$"
 if ! mv -f "$extract_dir/$bin" "$tmp_name" 2>/dev/null; then
