@@ -443,11 +443,47 @@ fn tasks__done_refused_when_the_approve_came_from_the_holding_session() {
     );
     let out = task(&sb, &["status", &id, "done"], "s-24", 5);
     assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
-    assert!(
-        stderr(&out).contains("no independent review"),
-        "{}",
-        stderr(&out)
+    let err = stderr(&out);
+    assert!(err.contains("no independent review"), "{err}");
+    // The disqualified verdict came from the holder itself, so naming the holder is naming the
+    // verdict's own session here.
+    assert!(err.contains("s-24"), "{err}");
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
+}
+
+#[test]
+fn tasks__done_refused_when_the_approve_came_from_a_session_that_checked_off_an_item() {
+    let sb = board("s-29");
+    let id = new_task(&sb, "history disqualifies", &["only criterion"], "s-29", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-29", 2)), 0);
+    // s-prior never holds the task, but it recorded the checklist.done earlier (e.g. before a
+    // transfer) — close enough to the work to disqualify it as an independent reviewer.
+    assert_eq!(
+        code(&task(
+            &sb,
+            &["check", &id, "1", "--session", "s-prior"],
+            "s-29",
+            3
+        )),
+        0
     );
+    assert_eq!(
+        code(&task(
+            &sb,
+            &["review", &id, "approve", "fine", "--session", "s-prior"],
+            "s-29",
+            4
+        )),
+        0
+    );
+    let out = task(&sb, &["status", &id, "done"], "s-29", 5);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("no independent review"), "{err}");
+    // The bug this pins: the message must name s-prior, the session that actually recorded the
+    // disqualified verdict — not s-29, the current holder, who never reviewed anything.
+    assert!(err.contains("s-prior"), "{err}");
+    assert!(!err.contains("other than s-29"), "{err}");
     assert_eq!(task_state(&sb, &id).0, "in_progress");
 }
 
@@ -520,6 +556,8 @@ fn tasks__done_refused_when_a_changes_verdict_is_newer_than_the_approve() {
     assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
     let err = stderr(&out);
     assert!(err.contains("\"changes\""), "{err}");
+    // Spells out the literal next command, like the other two refusal branches.
+    assert!(err.contains("ratchet task review"), "{err}");
     assert!(err.contains("approve"), "{err}");
     assert_eq!(task_state(&sb, &id).0, "in_progress");
 }

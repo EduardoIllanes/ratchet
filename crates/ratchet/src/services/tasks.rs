@@ -627,10 +627,12 @@ fn require_done_evidence(
 // Called only from `transition` above.
 #[allow(dead_code)]
 fn require_independent_review(conn: &Connection, task: &Task) -> Result<(), ServiceError> {
-    let missing = || {
-        let who = task
-            .claimed_by
-            .as_deref()
+    // `who` is the session to tell the reviewer to avoid: the verdict's own session when there
+    // is a disqualified verdict to point at (whether it was disqualified for being the current
+    // holder or for a claimed/checklist.done entry in the task's history), and the current
+    // holder only when there is no verdict at all to draw a session from.
+    let missing = |who: Option<&str>| {
+        let who = who
             .map(short_session)
             .unwrap_or_else(|| "the session that holds it".to_string());
         ServiceError::Invalid(format!(
@@ -639,7 +641,7 @@ fn require_independent_review(conn: &Connection, task: &Task) -> Result<(), Serv
         ))
     };
     let Some(ev) = latest_review_verdict(conn, &task.id)? else {
-        return Err(missing());
+        return Err(missing(task.claimed_by.as_deref()));
     };
     let verdict = ev
         .payload
@@ -648,17 +650,19 @@ fn require_independent_review(conn: &Connection, task: &Task) -> Result<(), Serv
         .unwrap_or("");
     if verdict != "approve" {
         return Err(ServiceError::Invalid(format!(
-            "{}: last verdict is \"{verdict}\" ({}) — fix, then have the reviewer record approve",
+            "{}: last verdict is \"{verdict}\" ({}) — fix, then have the reviewer run: ratchet task review {} approve \"...\"",
             task.id,
-            clock::iso(ev.ts)
+            clock::iso(ev.ts),
+            task.id
         )));
     }
-    let independent = match ev.session_id.as_deref() {
-        Some(reviewer) => !session_worked_on(conn, &task.id, task.claimed_by.as_deref(), reviewer)?,
-        None => false,
+    let reviewer = ev.session_id.as_deref();
+    let disqualified = match reviewer {
+        Some(r) => session_worked_on(conn, &task.id, task.claimed_by.as_deref(), r)?,
+        None => true,
     };
-    if !independent {
-        return Err(missing());
+    if disqualified {
+        return Err(missing(reviewer.or(task.claimed_by.as_deref())));
     }
     Ok(())
 }
@@ -2182,11 +2186,15 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("no independent review"), "{err}");
+        // The disqualified verdict came from the holder itself, so naming the holder and naming
+        // the verdict's own session say the same thing here — but the message must still name a
+        // session, not the placeholder fallback for "no verdict at all".
+        assert!(err.to_string().contains("s-impl"), "{err}");
     }
 
     #[test]
     fn done_is_refused_when_the_approve_came_from_a_session_that_checked_off_an_item() {
-        // s-checker never claimed or holds the task, but it recorded a checklist.done on it
+        // s-check never claimed or holds the task, but it recorded a checklist.done on it
         // earlier (a transferred task's history), which is close enough to the work to disqualify
         // it as an independent reviewer.
         let ts = at("2026-09-16T12:01:00Z");
@@ -2194,7 +2202,7 @@ mod tests {
         sessions::upsert_start(
             &mut c,
             StartInput {
-                session_id: "s-checker",
+                session_id: "s-check",
                 repo: "demo",
                 repo_root: "root",
                 cwd: "root",
@@ -2206,14 +2214,14 @@ mod tests {
             ts,
         )
         .unwrap();
-        check(&mut c, &id, 1, Source::Cli, Some("s-checker"), ts).unwrap();
+        check(&mut c, &id, 1, Source::Cli, Some("s-check"), ts).unwrap();
         review(
             &mut c,
             &id,
             "approve",
             "fine",
             Source::Cli,
-            Some("s-checker"),
+            Some("s-check"),
             ts,
         )
         .unwrap();
@@ -2228,7 +2236,13 @@ mod tests {
             ts,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("no independent review"), "{err}");
+        let err = err.to_string();
+        assert!(err.contains("no independent review"), "{err}");
+        // The bug this pins: naming the *holder* (s-impl) here would be wrong — s-impl never
+        // reviewed anything. The session that actually disqualified the verdict is s-check,
+        // and the message must say so, not fall back to the task's current holder.
+        assert!(err.contains("s-check"), "{err}");
+        assert!(!err.contains("s-impl"), "{err}");
     }
 
     #[test]
@@ -2295,8 +2309,12 @@ mod tests {
             later,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("\"changes\""), "{err}");
-        assert!(err.to_string().contains("approve"), "{err}");
+        let err = err.to_string();
+        assert!(err.contains("\"changes\""), "{err}");
+        // Spells out the literal next command, like the other two refusal branches, not just the
+        // bare word "approve".
+        assert!(err.contains("ratchet task review"), "{err}");
+        assert!(err.contains("approve"), "{err}");
     }
 
     #[test]

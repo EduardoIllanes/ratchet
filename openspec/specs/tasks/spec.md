@@ -144,11 +144,14 @@ task or an unknown verdict word SHALL be refused, listing the two valid words.
 ### Requirement: Done requires an independent review
 Moving a task to `done` SHALL be refused unless its most recent `review.verdict` event is
 `approve`, recorded by a session that is neither the task's current holder nor any session that
-recorded a `task.claimed` or a `checklist.done` event on it. The refusal SHALL name what is
-missing and the exact `ratchet task review` command that supplies it. `ratchet task status <id>
-done --unreviewed` SHALL bypass this requirement — the checklist requirement of "States and
-transitions" still applies — and SHALL record a note reading "done without independent review",
-so the bypass stays visible on the board.
+recorded a `task.claimed` or a `checklist.done` event on it. The refusal SHALL name the exact
+`ratchet task review` command that supplies a valid verdict, and the session to record it from
+other than: the disqualified verdict's own session when there is one to point at (whether it was
+disqualified for holding the task or for a claimed/checklist.done entry in the task's history
+that is not the current holder), and the current holder when there is no verdict at all.
+`ratchet task status <id> done --unreviewed` SHALL bypass this requirement — the checklist
+requirement of "States and transitions" still applies — and SHALL record a note reading "done
+without independent review", so the bypass stays visible on the board.
 
 #### Scenario: Done refused with no verdict
 - **WHEN** a task with a complete checklist and no `review.verdict` event is moved to `done`
@@ -158,7 +161,15 @@ so the bypass stays visible on the board.
 #### Scenario: Done refused when the approve came from the holding session
 - **WHEN** a task's only `review.verdict` event is `approve`, recorded by the session that
   currently holds the task, and the task is moved to `done`
-- **THEN** the operation is refused for the same reason as a missing verdict
+- **THEN** the operation is refused for the same reason as a missing verdict, naming that
+  holding session
+
+#### Scenario: Done refused when the approve came from a session that checked off an item
+- **WHEN** a task's most recent `review.verdict` event is `approve`, recorded by a session that
+  never held the task but earlier recorded a `checklist.done` event on it, and the task is moved
+  to `done`
+- **THEN** the operation is refused, naming that session — not the task's current holder, who
+  never reviewed anything
 
 #### Scenario: Done allowed after an approve from another session
 - **WHEN** a task's checklist is complete and its most recent `review.verdict` event is `approve`,
@@ -169,7 +180,7 @@ so the bypass stays visible on the board.
 - **WHEN** a task received an `approve` from an independent session and then a later `changes`
   verdict, and the task is moved to `done`
 - **THEN** the operation is refused, naming the `changes` verdict and when it was recorded, and
-  asking for a fresh `approve`
+  the exact `ratchet task review` command for a fresh `approve`
 
 #### Scenario: --unreviewed succeeds and records the note
 - **WHEN** `ratchet task status <id> done --unreviewed` is run on a task with a complete checklist
