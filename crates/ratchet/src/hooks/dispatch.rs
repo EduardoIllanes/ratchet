@@ -24,12 +24,13 @@ use crate::services::events;
 use crate::services::sessions::{self, StartInput};
 use crate::services::{tasks, ServiceError};
 
-pub const KNOWN_EVENTS: [&str; 8] = [
+pub const KNOWN_EVENTS: [&str; 9] = [
     "session-start",
     "prompt",
     "pre-tool",
     "post-tool",
     "stop",
+    "subagent-start",
     "subagent-stop",
     "pre-compact",
     "session-end",
@@ -44,6 +45,11 @@ pub struct Payload {
     pub cwd: Option<PathBuf>,
     pub hook_event_name: Option<String>,
     pub stop_hook_active: bool,
+    pub agent_id: Option<String>,
+    pub agent_type: Option<String>,
+    pub description: Option<String>,
+    pub transcript_path: Option<String>,
+    pub exit_status: Option<Value>,
 }
 
 pub fn parse_payload(text: &str) -> Result<Payload, String> {
@@ -76,7 +82,9 @@ pub fn dispatch(
         "prompt" => prompt(&payload, env, &cwd, home),
         // The handoff rule of group 2 goes on top of this heartbeat, and only it may return 2.
         "stop" => stop(&payload, env, &cwd, home),
-        "subagent-stop" | "pre-compact" => heartbeat(&payload, env, &cwd, home, None),
+        "subagent-start" => subagent_start(&payload, env, &cwd, home),
+        "subagent-stop" => subagent_stop(&payload, env, &cwd, home),
+        "pre-compact" => heartbeat(&payload, env, &cwd, home, None),
         "session-end" => session_end(&payload, env, &cwd, home),
         _ => Ok(0),
     }
@@ -409,6 +417,138 @@ fn stop(
     }
 }
 
+/// Heartbeat, then one `subagent.start` event carrying the agent identity the input offers.
+fn subagent_start(
+    payload: &Payload,
+    env: &HashMap<String, String>,
+    cwd: &Path,
+    home: &Path,
+) -> Result<i32, String> {
+    subagent_event(payload, env, cwd, home, EventKind::SubagentStart, false)
+}
+
+/// Heartbeat, then one `subagent.stop` event. Also carries the exit status when offered.
+fn subagent_stop(
+    payload: &Payload,
+    env: &HashMap<String, String>,
+    cwd: &Path,
+    home: &Path,
+) -> Result<i32, String> {
+    subagent_event(payload, env, cwd, home, EventKind::SubagentStop, true)
+}
+
+fn subagent_event(
+    payload: &Payload,
+    env: &HashMap<String, String>,
+    cwd: &Path,
+    home: &Path,
+    kind: EventKind,
+    with_exit_status: bool,
+) -> Result<i32, String> {
+    // The heartbeat alone refreshes the last signal (and registers an unknown session); the
+    // single recorded event below carries the payload, so this beat records none.
+    let Some(b) = beat(payload, env, cwd, home, None)? else {
+        return Ok(0);
+    };
+    let now = clock::now(env);
+    // Attributed to the first task in progress this session holds, if any; otherwise none.
+    let task_id = tasks::claimed_ids(&b.conn, &b.session.id)
+        .unwrap_or_default()
+        .into_iter()
+        .next();
+    // Meta fallback: an identifier with no type reads the type and description from the
+    // `agent-<id>.meta.json` file of this session beside the transcript. Read-only and
+    // best-effort: a missing or unreadable file keeps whatever identity is already known.
+    let mut agent_type = payload.agent_type.clone();
+    let mut description = payload.description.clone();
+    if let (Some(agent_id), None, Some(transcript)) = (
+        payload.agent_id.as_deref(),
+        agent_type.as_deref(),
+        payload.transcript_path.as_deref(),
+    ) {
+        let (meta_type, meta_description) = subagent_meta(transcript, &b.session.id, agent_id);
+        if agent_type.is_none() {
+            agent_type = meta_type;
+        }
+        if description.is_none() {
+            description = meta_description;
+        }
+    }
+    let mut event = serde_json::Map::new();
+    if let Some(agent_id) = payload.agent_id.as_deref() {
+        event.insert("agent_id".to_string(), Value::String(agent_id.to_string()));
+    }
+    if let Some(agent_type) = agent_type.as_deref() {
+        event.insert(
+            "agent_type".to_string(),
+            Value::String(agent_type.to_string()),
+        );
+    }
+    if let Some(description) = description.as_deref() {
+        event.insert(
+            "description".to_string(),
+            Value::String(description.to_string()),
+        );
+    }
+    if let Some(transcript) = payload.transcript_path.as_deref() {
+        event.insert(
+            "transcript_path".to_string(),
+            Value::String(transcript.to_string()),
+        );
+    }
+    if with_exit_status {
+        if let Some(exit_status) = payload.exit_status.clone() {
+            event.insert("exit_status".to_string(), exit_status);
+        }
+    }
+    events::emit(
+        &b.conn,
+        kind,
+        &Value::Object(event),
+        Source::Hook,
+        Some(b.session.id.as_str()),
+        task_id.as_deref(),
+        now,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(0)
+}
+
+/// Reads `<dir(transcript)>/<session_id>/subagents/agent-<id>.meta.json` and returns the
+/// `agentType` and `description` it names. Never fails: a missing or unparseable file yields
+/// `None`s and the hook records the event with whatever identity is already known.
+fn subagent_meta(
+    transcript_path: &str,
+    session_id: &str,
+    agent_id: &str,
+) -> (Option<String>, Option<String>) {
+    let none = (None, None);
+    let path = Path::new(transcript_path).parent().map(|dir| {
+        dir.join(session_id)
+            .join("subagents")
+            .join(format!("agent-{agent_id}.meta.json"))
+    });
+    let Some(path) = path else {
+        return none;
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return none;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return none;
+    };
+    (
+        value
+            .get("agentType")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        value
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    )
+}
+
 fn session_end(
     payload: &Payload,
     env: &HashMap<String, String>,
@@ -492,6 +632,7 @@ mod tests {
             "pre-tool",
             "post-tool",
             "stop",
+            "subagent-start",
             "subagent-stop",
             "pre-compact",
             "session-end",

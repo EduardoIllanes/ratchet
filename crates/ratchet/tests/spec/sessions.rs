@@ -220,20 +220,18 @@ fn sessions__a_prompt_updates_the_last_signal() {
 }
 
 #[test]
-fn sessions__compaction_and_subagent_end_update_the_last_signal() {
+fn sessions__compaction_updates_the_last_signal_with_no_event() {
     let sb = sandbox();
     start_session(&sb, "s-12", &sb.root(), T0);
-    for (event, when) in [("pre-compact", at(10)), ("subagent-stop", at(15))] {
-        let out = hook_env(
-            &sb,
-            event,
-            &session_payload("s-12", &sb.root()),
-            &sb.root(),
-            &[("RATCHET_NOW", &when)],
-        );
-        assert_eq!(code(&out), 0, "{event}: {}", stderr(&out));
-    }
-    assert_eq!(last_seen(&sb, "s-12"), at(15));
+    let out = hook_env(
+        &sb,
+        "pre-compact",
+        &session_payload("s-12", &sb.root()),
+        &sb.root(),
+        &[("RATCHET_NOW", &at(10))],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert_eq!(last_seen(&sb, "s-12"), at(10));
     assert_eq!(
         count(
             &sb,
@@ -241,6 +239,271 @@ fn sessions__compaction_and_subagent_end_update_the_last_signal() {
             &["s-12"]
         ),
         0
+    );
+}
+
+// --- Subagent start and stop ---------------------------------------------------------------
+
+/// Payload of a subagent hook: the session-scoped base plus the agent identity the hook
+/// carries. `extra` holds the agent keys (`agent_type`, `description`, `transcript_path`,
+/// `exit_status`) the scenario under test offers.
+fn subagent_payload(
+    session: &str,
+    root: &std::path::Path,
+    agent_id: &str,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut payload = json!({
+        "session_id": session,
+        "cwd": root.to_string_lossy(),
+        "agent_id": agent_id,
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        payload[k] = v.clone();
+    }
+    payload
+}
+
+fn recorded_payload(sb: &Sandbox, session: &str, kind: &str) -> serde_json::Value {
+    let payloads = session_event_payloads(sb, session, kind);
+    assert_eq!(payloads.len(), 1, "{kind}: {payloads:?}");
+    serde_json::from_str(&payloads[0]).expect("recorded payload is JSON")
+}
+
+#[test]
+fn sessions__a_subagent_start_records_a_start_event() {
+    let session = "s-sub-start";
+    let sb = board(session);
+    let id = new_task(&sb, "held work", &["a"], session, 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], session, 2)), 0);
+    let transcript = sb.scratchpad.path().join("transcripts").join("t.jsonl");
+    let agent = "a1b2c3d4e5f6";
+    let when = at(3);
+    let root = sb.root();
+    let payload = subagent_payload(
+        session,
+        &root,
+        agent,
+        json!({
+            "agent_type": "explore",
+            "description": "reconnoitre",
+            "transcript_path": transcript.to_string_lossy(),
+        }),
+    );
+    let out = hook_env(
+        &sb,
+        "subagent-start",
+        &payload,
+        &root,
+        &[("RATCHET_NOW", &when)],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert_eq!(last_seen(&sb, session), when);
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND kind = 'subagent.start'",
+            &[session]
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND kind = 'subagent.start' AND task_id = ?2",
+            &[session, id.as_str()]
+        ),
+        1,
+        "the start event was not attributed to the held task"
+    );
+    let recorded = recorded_payload(&sb, session, "subagent.start");
+    assert_eq!(recorded["agent_id"], agent);
+    assert_eq!(recorded["agent_type"], "explore");
+    assert_eq!(recorded["description"], "reconnoitre");
+    assert!(
+        recorded["transcript_path"]
+            .as_str()
+            .unwrap()
+            .contains("t.jsonl"),
+        "{recorded}"
+    );
+}
+
+#[test]
+fn sessions__a_subagent_stop_records_a_stop_event() {
+    let session = "s-sub-stop";
+    let sb = board(session);
+    let id = new_task(&sb, "held work", &["a"], session, 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], session, 2)), 0);
+    let transcript = sb.scratchpad.path().join("transcripts").join("t.jsonl");
+    let agent = "b1c2d3e4f5a6";
+    let when = at(3);
+    let root = sb.root();
+    let payload = subagent_payload(
+        session,
+        &root,
+        agent,
+        json!({
+            "agent_type": "explore",
+            "description": "reconnoitre",
+            "transcript_path": transcript.to_string_lossy(),
+            "exit_status": 0,
+        }),
+    );
+    let out = hook_env(
+        &sb,
+        "subagent-stop",
+        &payload,
+        &root,
+        &[("RATCHET_NOW", &when)],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert_eq!(last_seen(&sb, session), when);
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND kind = 'subagent.stop' AND task_id = ?2",
+            &[session, id.as_str()]
+        ),
+        1,
+        "the stop event was not attributed to the held task"
+    );
+    let recorded = recorded_payload(&sb, session, "subagent.stop");
+    assert_eq!(recorded["agent_id"], agent);
+    assert_eq!(recorded["agent_type"], "explore");
+    assert!(
+        recorded["transcript_path"]
+            .as_str()
+            .unwrap()
+            .contains("t.jsonl"),
+        "{recorded}"
+    );
+    assert_eq!(recorded["exit_status"], 0);
+}
+
+#[test]
+fn sessions__a_stop_with_no_held_task_records_a_session_level_event() {
+    let session = "s-sub-lonely";
+    let sb = board(session);
+    let _ = new_task(&sb, "nobody claimed me", &[], session, 1);
+    let transcript = sb.scratchpad.path().join("transcripts").join("t.jsonl");
+    let agent = "c1d2e3f4a5b6";
+    let root = sb.root();
+    let payload = subagent_payload(
+        session,
+        &root,
+        agent,
+        json!({
+            "agent_type": "explore",
+            "transcript_path": transcript.to_string_lossy(),
+            "exit_status": 0,
+        }),
+    );
+    let out = hook_env(
+        &sb,
+        "subagent-stop",
+        &payload,
+        &root,
+        &[("RATCHET_NOW", &at(2))],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND kind = 'subagent.stop'",
+            &[session]
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND kind = 'subagent.stop' AND task_id IS NULL",
+            &[session]
+        ),
+        1,
+        "the stop event should carry no task"
+    );
+}
+
+#[test]
+fn sessions__a_missing_type_falls_back_to_the_meta_file() {
+    let session = "s-sub-meta";
+    let sb = board(session);
+    let id = new_task(&sb, "held work", &["a"], session, 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], session, 2)), 0);
+    let agent = "d1e2f3a4b5c6";
+    let transcript_dir = sb.scratchpad.path().join("transcripts");
+    let transcript = transcript_dir.join("t.jsonl");
+    let meta_path = transcript_dir
+        .join(session)
+        .join("subagents")
+        .join(format!("agent-{agent}.meta.json"));
+    std::fs::create_dir_all(meta_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &meta_path,
+        r#"{"agentType": "bash-runner", "description": "shell work"}"#,
+    )
+    .unwrap();
+    let root = sb.root();
+    // No type and no description on the input: both must come from the meta file.
+    let payload = subagent_payload(
+        session,
+        &root,
+        agent,
+        json!({ "transcript_path": transcript.to_string_lossy(), "exit_status": 0 }),
+    );
+    let out = hook_env(
+        &sb,
+        "subagent-stop",
+        &payload,
+        &root,
+        &[("RATCHET_NOW", &at(3))],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    let recorded = recorded_payload(&sb, session, "subagent.stop");
+    assert_eq!(recorded["agent_id"], agent);
+    assert_eq!(recorded["agent_type"], "bash-runner", "{recorded}");
+    assert_eq!(recorded["description"], "shell work", "{recorded}");
+    assert_eq!(
+        std::fs::read_to_string(&meta_path).unwrap(),
+        r#"{"agentType": "bash-runner", "description": "shell work"}"#,
+        "the hook must only read the meta file, never write it"
+    );
+}
+
+#[test]
+fn sessions__a_missing_meta_file_still_records() {
+    let session = "s-sub-nometa";
+    let sb = board(session);
+    let id = new_task(&sb, "held work", &["a"], session, 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], session, 2)), 0);
+    let agent = "e1f2a3b4c5d6";
+    // A transcript directory with no meta file anywhere beside it.
+    let transcript = sb.scratchpad.path().join("empty").join("t.jsonl");
+    let root = sb.root();
+    let payload = subagent_payload(
+        session,
+        &root,
+        agent,
+        json!({ "transcript_path": transcript.to_string_lossy(), "exit_status": 0 }),
+    );
+    let out = hook_env(
+        &sb,
+        "subagent-stop",
+        &payload,
+        &root,
+        &[("RATCHET_NOW", &at(3))],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    let recorded = recorded_payload(&sb, session, "subagent.stop");
+    assert_eq!(recorded["agent_id"], agent);
+    assert!(
+        recorded
+            .get("agent_type")
+            .map(|v| v.is_null())
+            .unwrap_or(true),
+        "no type is known: {recorded}"
     );
 }
 
