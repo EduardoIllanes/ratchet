@@ -612,6 +612,122 @@ fn agent_protocol__post_check_without_a_prior_snapshot_is_silent() {
     );
 }
 
+// --- Requirement: Big reads go to a cheap reader, not into the orchestrator's context ---------
+
+/// Content of exactly `n` lines (each newline-terminated), enough to trip — or stay under —
+/// the `big-read` line-count check.
+fn n_lines(n: usize) -> String {
+    let mut s = String::new();
+    for i in 1..=n {
+        s.push_str(&format!("// line {i}\n"));
+    }
+    s
+}
+
+#[test]
+fn agent_protocol__read_of_a_big_main_tree_file_blocked() {
+    let sb = sandbox();
+    let root = sb.root();
+    fs::write(root.join("big.rs"), n_lines(400)).unwrap();
+    git(&root, &["add", "big.rs"]);
+    git(&root, &["commit", "-q", "-m", "big"]);
+    let out = hook_in(&sb, "pre-tool", &read(&root.join("big.rs"), &root), &root);
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.starts_with("[ratchet guardrail:big-read]"), "{err}");
+    assert!(err.contains("offset"), "{err}");
+    assert!(err.contains("limit"), "{err}");
+    assert!(err.contains("reader"), "{err}");
+}
+
+#[test]
+fn agent_protocol__read_with_a_window_allowed() {
+    let sb = sandbox();
+    let root = sb.root();
+    fs::write(root.join("big.rs"), n_lines(400)).unwrap();
+    git(&root, &["add", "big.rs"]);
+    git(&root, &["commit", "-q", "-m", "big"]);
+    let out = hook_in(
+        &sb,
+        "pre-tool",
+        &read_window(&root.join("big.rs"), None, Some(80), &root),
+        &root,
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+}
+
+#[test]
+fn agent_protocol__small_file_allowed() {
+    let sb = sandbox();
+    let root = sb.root();
+    fs::write(root.join("small.rs"), n_lines(349)).unwrap();
+    git(&root, &["add", "small.rs"]);
+    git(&root, &["commit", "-q", "-m", "small"]);
+    let out = hook_in(&sb, "pre-tool", &read(&root.join("small.rs"), &root), &root);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+}
+
+#[test]
+fn agent_protocol__cat_of_a_big_file_blocked_piped_cat_allowed() {
+    let sb = sandbox();
+    let root = sb.root();
+    fs::write(root.join("src/big.rs"), n_lines(400)).unwrap();
+    git(&root, &["add", "src/big.rs"]);
+    git(&root, &["commit", "-q", "-m", "big"]);
+    let blocked = hook_in(&sb, "pre-tool", &bash("cat src/big.rs", &root), &root);
+    assert_eq!(code(&blocked), 2, "stderr: {}", stderr(&blocked));
+    assert!(
+        stderr(&blocked).starts_with("[ratchet guardrail:big-read]"),
+        "{}",
+        stderr(&blocked)
+    );
+    let piped_grep = hook_in(
+        &sb,
+        "pre-tool",
+        &bash("cat src/big.rs | grep fn", &root),
+        &root,
+    );
+    assert_eq!(code(&piped_grep), 0, "stderr: {}", stderr(&piped_grep));
+    let piped_head = hook_in(
+        &sb,
+        "pre-tool",
+        &bash("head -40 src/big.rs | cat", &root),
+        &root,
+    );
+    assert_eq!(code(&piped_head), 0, "stderr: {}", stderr(&piped_head));
+}
+
+#[test]
+fn agent_protocol__big_file_inside_a_worktree_allowed() {
+    let sb = sandbox();
+    let wt = sb.root().join(".worktrees/wt");
+    fs::write(wt.join("big.rs"), n_lines(400)).unwrap();
+    let out = hook_in(&sb, "pre-tool", &read(&wt.join("big.rs"), &wt), &wt);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+}
+
+#[test]
+fn agent_protocol__threshold_overridden_per_repo() {
+    let sb = sandbox();
+    let root = sb.root();
+    fs::write(root.join("big.rs"), n_lines(400)).unwrap();
+    git(&root, &["add", "big.rs"]);
+    git(&root, &["commit", "-q", "-m", "big"]);
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n[guardrails]\nbig_read_lines = 1000\n",
+    );
+    let allowed = hook_in(&sb, "pre-tool", &read(&root.join("big.rs"), &root), &root);
+    assert_eq!(code(&allowed), 0, "stderr: {}", stderr(&allowed));
+    sb.write_marker("[repo]\nworktrees_dir = \".worktrees\"\n[guardrails]\nbig_read_lines = 100\n");
+    let blocked = hook_in(&sb, "pre-tool", &read(&root.join("big.rs"), &root), &root);
+    assert_eq!(code(&blocked), 2, "stderr: {}", stderr(&blocked));
+    assert!(
+        stderr(&blocked).starts_with("[ratchet guardrail:big-read]"),
+        "{}",
+        stderr(&blocked)
+    );
+}
+
 // --- Requirement: Hooks never break a session -------------------------------------
 
 #[test]

@@ -179,6 +179,26 @@ pub fn post_tool(payload: &Value) -> Value {
     v
 }
 
+/// A `Read` call with no window (no `offset`, no `limit`).
+pub fn read(file_path: &Path, cwd: &Path) -> Value {
+    json!({ "tool_name": "Read", "tool_input": { "file_path": file_path.to_string_lossy() }, "cwd": cwd.to_string_lossy() })
+}
+
+/// A `Read` call with an explicit window. Either bound may be omitted (`None`); the
+/// corresponding key is left out of `tool_input` rather than sent as `null`, matching what
+/// Claude Code itself sends.
+pub fn read_window(file_path: &Path, offset: Option<i64>, limit: Option<i64>, cwd: &Path) -> Value {
+    let mut input = serde_json::Map::new();
+    input.insert("file_path".to_string(), json!(file_path.to_string_lossy()));
+    if let Some(o) = offset {
+        input.insert("offset".to_string(), json!(o));
+    }
+    if let Some(l) = limit {
+        input.insert("limit".to_string(), json!(l));
+    }
+    json!({ "tool_name": "Read", "tool_input": Value::Object(input), "cwd": cwd.to_string_lossy() })
+}
+
 pub fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).to_string()
 }
