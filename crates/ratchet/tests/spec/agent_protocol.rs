@@ -610,6 +610,86 @@ fn agent_protocol__inline_custom_rule_with_empty_tools_is_refused() {
     assert!(stderr(&out).contains("no-curl"), "{}", stderr(&out));
 }
 
+// --- Requirement: A rule that fails validation is dropped, not fatal ---------------
+
+#[test]
+fn agent_protocol__inline_rule_named_env_files_still_leaves_the_builtin_blocking() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"env-files\"\nmatch = 'never-matches-anything'\nmessage = \"use x instead\"\n",
+    );
+    let root = sb.root();
+    let out = hook_in(
+        &sb,
+        "pre-tool",
+        &write(&root.join(".env"), "KEY=1", &root),
+        &root,
+    );
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("[ratchet guardrail:env-files]"),
+        "the builtin should still block even though the same-named inline rule was invalid: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn agent_protocol__inline_rule_named_main_tree_still_leaves_the_builtin_blocking() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"main-tree\"\nmatch = 'never-matches-anything'\nmessage = \"use x instead\"\n",
+    );
+    let root = sb.root();
+    let out = hook_in(
+        &sb,
+        "pre-tool",
+        &edit(&root.join("tracked.txt"), "bye", &root),
+        &root,
+    );
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("[ratchet guardrail:main-tree]"),
+        "the builtin should still block even though the same-named inline rule was invalid: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn agent_protocol__a_bad_regex_drops_only_its_own_rule() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n\
+         [[guardrails.rules]]\nname = \"broken-regex\"\nmatch = '('\nmessage = \"use x instead\"\n\n\
+         [[guardrails.rules]]\nname = \"no-curl\"\nmatch = '^\\s*curl\\b'\nmessage = \"Use the repo's fetch script instead.\"\n",
+    );
+    let root = sb.root();
+    // The built-in still fires, unaffected by the sibling rule with the uncompilable regex.
+    let out = hook_in(
+        &sb,
+        "pre-tool",
+        &bash("git reset --hard HEAD~1", &root),
+        &root,
+    );
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("[ratchet guardrail:git-destructive]"),
+        "{}",
+        stderr(&out)
+    );
+    // The second, valid inline rule in the same file still evaluates and blocks its own pattern.
+    let curl_out = hook_in(
+        &sb,
+        "pre-tool",
+        &bash("curl https://example.com", &root),
+        &root,
+    );
+    assert_eq!(code(&curl_out), 2, "stderr: {}", stderr(&curl_out));
+    assert_eq!(
+        stderr(&curl_out).trim(),
+        "[ratchet guardrail:no-curl] Use the repo's fetch script instead."
+    );
+}
+
 // --- Requirement: Main-tree writes detected after the fact -------------------------
 
 #[test]

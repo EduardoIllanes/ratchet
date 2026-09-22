@@ -183,6 +183,38 @@ and the same exit code as any other rule.
 - **WHEN** the machine rules file redefines `git-destructive` with a different message and the tool call is `git reset --hard`
 - **THEN** the hook blocks with the machine message
 
+### Requirement: A rule that fails validation is dropped, not fatal
+A guardrail rule from the repo's `ratchet.toml` (`[[guardrails.rules]]`) or from the repo's
+extra rules file that fails validation — a `name` reusing a built-in id, an empty
+`tools = []`, a `match` that does not compile as a regex, an unknown key, an empty `message`,
+or a `message` with no stated alternative — SHALL be left out of the rule set on its own: the
+built-ins and every other valid rule, from either file, SHALL still apply to `PreToolUse`. A
+`ratchet.log` entry SHALL name the dropped rule, the file it came from, and the reason it was
+dropped. The session-start briefing SHALL print one line for each rule left out this way,
+naming the rule, its file, and the reason, once per session start. `ratchet guardrails list`
+SHALL keep refusing (exit 1) as today, since it validates the raw config directly rather than
+loading the resilient rule set the hooks use.
+
+#### Scenario: Inline rule named env-files still leaves the builtin blocking
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry with `name = "env-files"` and a `Write` targets `.env`
+- **THEN** the pre-tool hook still blocks with the built-in rule `env-files` (exit 2)
+
+#### Scenario: Inline rule named main-tree still leaves the builtin blocking
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry with `name = "main-tree"` and an `Edit` targets a tracked file of the main tree
+- **THEN** the pre-tool hook still blocks with the built-in rule `main-tree`
+
+#### Scenario: A bad regex drops only its own rule
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry whose `match` does not compile as a regex, alongside a second, valid inline rule, and the tool call is `git reset --hard HEAD~1`
+- **THEN** the pre-tool hook still blocks with the built-in rule `git-destructive`, and a tool call matching the second inline rule's own pattern is still blocked by that rule
+
+#### Scenario: The briefing names each rule left out
+- **WHEN** the repo has one invalid inline rule in `ratchet.toml` and the session-start hook runs
+- **THEN** stdout has exactly one line naming the rule, `ratchet.toml`, and the reason it was left out
+
+#### Scenario: No invalid rule, no left-out line
+- **WHEN** the repo has no invalid guardrail rule and the session-start hook runs
+- **THEN** the briefing has no line naming a rule left out
+
 ### Requirement: Main-tree writes detected after the fact
 In PostToolUse for `Bash` and `PowerShell` inside an opted-in repo, ratchet SHALL compare the
 set of modified tracked files of the main tree (`git status --porcelain --untracked-files=no`
