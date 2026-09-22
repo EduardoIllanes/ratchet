@@ -16,8 +16,9 @@ disk, and writes nothing except an explicit `--note`.
 ### Requirement: Transcripts are located per session from its working directory
 For each session of the repo, ratchet SHALL look for `<projects>/<slug>/<session id>.jsonl`,
 where `<projects>` is `~/.claude/projects` unless `RATCHET_CLAUDE_PROJECTS` is set, and
-`<slug>` is the session's recorded `cwd` with every path separator replaced by `-`. Subagent
-transcripts of that session SHALL be read from `<projects>/<slug>/<session id>/subagents/`.
+`<slug>` is the session's recorded `cwd` with every character that is not an ASCII letter or
+digit replaced by `-`. Subagent transcripts of that session SHALL be read from
+`<projects>/<slug>/<session id>/subagents/`.
 A session whose transcript is absent SHALL appear as one `no transcript` row and SHALL NOT
 fail the report. A missing `<projects>` directory SHALL fail with one stderr line naming the
 path looked at and exit 1.

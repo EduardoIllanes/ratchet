@@ -439,12 +439,15 @@ pub fn status(
     }
 }
 
+/// `positions` holds one or more item numbers, in the order given on the command line; every one
+/// is validated before anything is written (T-0010's batching requirement — see
+/// `tasks::check_many`/`uncheck_many`). A single position behaves exactly as before.
 pub fn check(
     env: &HashMap<String, String>,
     cwd: Option<PathBuf>,
     session: Option<&str>,
     id: &str,
-    position: i64,
+    positions: &[i64],
     undo: bool,
     json_out: bool,
 ) -> i32 {
@@ -454,19 +457,19 @@ pub fn check(
     };
     let session_id = attributed(&f, session);
     let result = if undo {
-        tasks::uncheck(
+        tasks::uncheck_many(
             &mut f.conn,
             id,
-            position,
+            positions,
             Source::Cli,
             session_id.as_deref(),
             f.now,
         )
     } else {
-        tasks::check(
+        tasks::check_many(
             &mut f.conn,
             id,
-            position,
+            positions,
             Source::Cli,
             session_id.as_deref(),
             f.now,
@@ -474,21 +477,23 @@ pub fn check(
     };
     match result {
         Err(e) => fail(e),
-        Ok(item) => {
+        Ok(items) => {
             if json_out {
-                output::emit_json(&f.home, "task-check", &json!(item), f.now);
+                output::emit_json(&f.home, "task-check", &json!(items), f.now);
             } else {
                 let progress = tasks::progress(&f.conn, id)
                     .ok()
                     .flatten()
                     .map(|(d, t)| format!("  ({d}/{t})"))
                     .unwrap_or_default();
-                println!(
-                    "{id} [{}] {}. {}{progress}",
-                    if item.done { "x" } else { " " },
-                    item.position,
-                    item.text
-                );
+                for item in &items {
+                    println!(
+                        "{id} [{}] {}. {}{progress}",
+                        if item.done { "x" } else { " " },
+                        item.position,
+                        item.text
+                    );
+                }
             }
             0
         }
@@ -536,70 +541,112 @@ pub fn review(
     }
 }
 
+/// `texts` holds one or more note texts, in the order given on the command line, each its own
+/// `note` event (T-0010). A single text behaves exactly as before.
 pub fn note(
     env: &HashMap<String, String>,
     cwd: Option<PathBuf>,
     session: Option<&str>,
     id: &str,
-    text: &str,
+    texts: &[String],
     json_out: bool,
-) -> i32 {
-    record(env, cwd, session, id, text, json_out, false)
-}
-
-pub fn handoff(
-    env: &HashMap<String, String>,
-    cwd: Option<PathBuf>,
-    session: Option<&str>,
-    id: &str,
-    text: &str,
-    json_out: bool,
-) -> i32 {
-    record(env, cwd, session, id, text, json_out, true)
-}
-
-fn record(
-    env: &HashMap<String, String>,
-    cwd: Option<PathBuf>,
-    session: Option<&str>,
-    id: &str,
-    text: &str,
-    json_out: bool,
-    is_handoff: bool,
 ) -> i32 {
     let mut f = match face(env, cwd) {
         Ok(v) => v,
         Err(e) => return fail(e),
     };
     let session_id = attributed(&f, session);
-    let result = if is_handoff {
-        tasks::handoff(
-            &mut f.conn,
-            id,
-            text,
-            Source::Cli,
-            session_id.as_deref(),
-            f.now,
-        )
-    } else {
-        tasks::note(
-            &mut f.conn,
-            id,
-            text,
-            Source::Cli,
-            session_id.as_deref(),
-            f.now,
-        )
-    };
-    match result {
+    match tasks::note_many(
+        &mut f.conn,
+        id,
+        texts,
+        Source::Cli,
+        session_id.as_deref(),
+        f.now,
+    ) {
         Err(e) => fail(e),
-        Ok(ev) => {
+        Ok(events) => {
             if json_out {
-                output::emit_json(&f.home, "task-record", &json!(ev), f.now);
-            } else if is_handoff {
-                println!("{id} handoff recorded");
+                output::emit_json(&f.home, "task-record", &json!(events), f.now);
             } else {
-                println!("{id} note recorded");
+                for _ in &events {
+                    println!("{id} note recorded");
+                }
+            }
+            0
+        }
+    }
+}
+
+/// Records the handoff, then — when `status` is given — attempts the same transition
+/// `ratchet task status <id> <status>` would, forwarding `why` and `unreviewed`. The handoff is
+/// recorded regardless of what the transition does; a refused transition exits with that
+/// transition's own error (T-0010). With no `status`, behaves exactly as before this requirement
+/// existed.
+#[allow(clippy::too_many_arguments)]
+pub fn handoff(
+    env: &HashMap<String, String>,
+    cwd: Option<PathBuf>,
+    session: Option<&str>,
+    id: &str,
+    text: &str,
+    status: Option<&str>,
+    why: Option<&str>,
+    unreviewed: bool,
+    json_out: bool,
+) -> i32 {
+    let mut f = match face(env, cwd) {
+        Ok(v) => v,
+        Err(e) => return fail(e),
+    };
+    let session_id = attributed(&f, session);
+    let handoff_ev = match tasks::handoff(
+        &mut f.conn,
+        id,
+        text,
+        Source::Cli,
+        session_id.as_deref(),
+        f.now,
+    ) {
+        Err(e) => return fail(e),
+        Ok(ev) => ev,
+    };
+    let Some(status) = status else {
+        if json_out {
+            output::emit_json(&f.home, "task-record", &json!(handoff_ev), f.now);
+        } else {
+            println!("{id} handoff recorded");
+        }
+        return 0;
+    };
+    let to = match parse_status(status) {
+        Ok(s) => s,
+        Err(e) => return fail(e),
+    };
+    match tasks::transition(
+        &mut f.conn,
+        id,
+        to,
+        Source::Cli,
+        session_id.as_deref(),
+        why,
+        unreviewed,
+        f.now,
+    ) {
+        // The handoff above already committed; this exits with the transition's own error, as
+        // `ratchet task status` would for the same move.
+        Err(e) => fail(e),
+        Ok(task) => {
+            if json_out {
+                output::emit_json(
+                    &f.home,
+                    "task-record",
+                    &json!({ "handoff": handoff_ev, "task": task }),
+                    f.now,
+                );
+            } else {
+                println!("{id} handoff recorded");
+                println!("{} → {}", task.id, task.status.as_str());
             }
             0
         }

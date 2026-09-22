@@ -13,6 +13,7 @@ mod output;
 mod pdf;
 mod repo;
 mod services;
+mod usage;
 
 use std::collections::HashMap;
 
@@ -91,6 +92,25 @@ enum Cmd {
         /// Force OCR from the start; skips the fast pass.
         #[arg(long)]
         ocr: bool,
+    },
+    /// Token cost per task, role and model, read from Claude Code's own transcripts.
+    Usage {
+        /// Show one task instead of the window's listing.
+        id: Option<String>,
+        /// Aggregate across the window: task, role, model or session.
+        #[arg(long)]
+        by: Option<String>,
+        /// Window: "7d", "30d" or a date (default 7d).
+        #[arg(long)]
+        since: Option<String>,
+        /// Drop the repo filter.
+        #[arg(long = "all-repos")]
+        all_repos: bool,
+        #[arg(long)]
+        json: bool,
+        /// Append the one-task summary as a note on `<id>` (requires `<id>`).
+        #[arg(long)]
+        note: bool,
     },
 }
 
@@ -221,26 +241,39 @@ enum TaskCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Mark a checklist item as done, or undo it.
+    /// Mark one or more checklist items as done, in order, or undo them. A bad number anywhere
+    /// in the list refuses the whole call before marking anything.
     Check {
         id: String,
-        position: i64,
+        #[arg(required = true, num_args = 1..)]
+        positions: Vec<i64>,
         #[arg(long)]
         undo: bool,
         #[arg(long)]
         json: bool,
     },
-    /// Record a decision or a finding on a task.
+    /// Record one or more decisions or findings on a task, each its own event, in order.
     Note {
         id: String,
-        text: String,
+        #[arg(required = true, num_args = 1..)]
+        texts: Vec<String>,
         #[arg(long)]
         json: bool,
     },
-    /// Record what is left and how to resume.
+    /// Record what is left and how to resume; `--status` also applies that transition (the same
+    /// rules `task status` applies), after the handoff is recorded either way.
     Handoff {
         id: String,
         text: String,
+        /// Move the task to this status after recording the handoff.
+        #[arg(long)]
+        status: Option<String>,
+        /// Reason forwarded to the transition; required to close a task with no checklist.
+        #[arg(long)]
+        why: Option<String>,
+        /// Owner-only escape hatch forwarded to the transition (see `task status --unreviewed`).
+        #[arg(long)]
+        unreviewed: bool,
         #[arg(long)]
         json: bool,
     },
@@ -389,16 +422,31 @@ fn main() {
             } => cli::task_cmd::review(&env, cwd, session.as_deref(), &id, &verdict, &text, json),
             TaskCmd::Check {
                 id,
-                position,
+                positions,
                 undo,
                 json,
-            } => cli::task_cmd::check(&env, cwd, session.as_deref(), &id, position, undo, json),
-            TaskCmd::Note { id, text, json } => {
-                cli::task_cmd::note(&env, cwd, session.as_deref(), &id, &text, json)
+            } => cli::task_cmd::check(&env, cwd, session.as_deref(), &id, &positions, undo, json),
+            TaskCmd::Note { id, texts, json } => {
+                cli::task_cmd::note(&env, cwd, session.as_deref(), &id, &texts, json)
             }
-            TaskCmd::Handoff { id, text, json } => {
-                cli::task_cmd::handoff(&env, cwd, session.as_deref(), &id, &text, json)
-            }
+            TaskCmd::Handoff {
+                id,
+                text,
+                status,
+                why,
+                unreviewed,
+                json,
+            } => cli::task_cmd::handoff(
+                &env,
+                cwd,
+                session.as_deref(),
+                &id,
+                &text,
+                status.as_deref(),
+                why.as_deref(),
+                unreviewed,
+                json,
+            ),
             TaskCmd::Archive { id, json } => {
                 cli::task_cmd::archive(&env, cwd, session.as_deref(), &id, json)
             }
@@ -418,6 +466,24 @@ fn main() {
             None => cli::map_cmd::generate(wire, &env, cwd),
         },
         Cmd::Pdf { file, pages, ocr } => cli::pdf_cmd::run(&file, pages.as_deref(), ocr, &env),
+        Cmd::Usage {
+            id,
+            by,
+            since,
+            all_repos,
+            json,
+            note,
+        } => cli::usage_cmd::run(
+            &env,
+            cwd,
+            session.as_deref(),
+            id.as_deref(),
+            by.as_deref(),
+            since.as_deref(),
+            all_repos,
+            json,
+            note,
+        ),
     };
     std::process::exit(code);
 }

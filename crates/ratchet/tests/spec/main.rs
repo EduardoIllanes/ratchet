@@ -10,3 +10,4 @@ mod pdf;
 mod sessions;
 mod support;
 mod tasks;
+mod usage;

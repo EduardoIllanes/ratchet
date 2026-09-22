@@ -104,6 +104,23 @@ that do.
 - **WHEN** item 9 of a task with 5 items is marked
 - **THEN** the operation is refused, listing the available items
 
+### Requirement: Checking several items in one call
+`ratchet task check <id> <n> [<n> ...]` SHALL accept one or more item positions and mark each one
+done, in the order given, appending one `checklist.done` event per item (the same holds for
+`--undo` and `checklist.undone`). If any position given does not exist on the checklist, the whole
+call SHALL be refused exactly as marking that one position alone would be, listing the available
+items, and no item in the call SHALL be marked. A call naming exactly one position behaves exactly
+as before this requirement existed.
+
+#### Scenario: Checking several items in one call
+- **WHEN** `ratchet task check <id> 1 2 3` is run on a task with at least three items
+- **THEN** items 1, 2 and 3 are done, each recorded against the calling session, and the history
+  gained three `checklist.done` events, one per item, in that order
+
+#### Scenario: A bad number in a batch refuses the whole call
+- **WHEN** `ratchet task check <id> 1 9` is run on a task with fewer than 9 items
+- **THEN** the operation is refused, listing the available items, and item 1 is left unmarked
+
 ### Requirement: Progress is derived
 The progress of a task SHALL be computed as items done over total items. A task with no items SHALL
 report no progress — not zero — and no interface SHALL accept a progress value from the outside.
@@ -128,6 +145,33 @@ handoff of a task SHALL be the most recent one and SHALL be available in every v
 #### Scenario: An empty handoff is refused
 - **WHEN** a handoff is recorded with blank text
 - **THEN** the operation is refused asking what is left and how to resume, and nothing is recorded
+
+### Requirement: Recording several notes in one call
+`ratchet task note <id> "<text>" ["<text>" ...]` SHALL accept one or more texts and append one
+`note` event per text, in the order given. A call naming exactly one text behaves exactly as
+before this requirement existed.
+
+#### Scenario: Recording several notes in one call
+- **WHEN** `ratchet task note <id> "first" "second"` is run
+- **THEN** two `note` events are appended, in that order, each carrying its own text
+
+### Requirement: A handoff can carry a status transition
+`ratchet task handoff <id> "<text>" --status <state>` SHALL record the handoff and then attempt
+the same transition `ratchet task status <id> <state>` would, including its `--why` and
+`--unreviewed` and the done gate of "Done requires an independent review". The handoff SHALL be
+recorded regardless of the transition's outcome. A refused transition SHALL exit with that
+transition's own error; a handoff given with no `--status` behaves exactly as before this
+requirement existed.
+
+#### Scenario: A handoff moves the task when the transition is valid
+- **WHEN** `ratchet task handoff <id> "…" --status review` is run on a task that is `in_progress`
+- **THEN** the handoff is recorded and the task is now `review`
+
+#### Scenario: A refused transition after a handoff still records the handoff
+- **WHEN** `ratchet task handoff <id> "…" --status done` is run on a task with pending checklist
+  items
+- **THEN** the operation is refused with the same message `ratchet task status <id> done` would
+  give, and the handoff is recorded regardless
 
 ### Requirement: Review verdicts
 An independent review of a task SHALL be recorded as a verdict — `approve` or `changes` — with

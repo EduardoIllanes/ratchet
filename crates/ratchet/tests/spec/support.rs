@@ -861,3 +861,305 @@ pub fn map_at(dir: &Path, home: &Path, args: &[&str]) -> Output {
         .output()
         .unwrap()
 }
+
+// --- group 7: usage --------------------------------------------------------------------------
+//
+// `TranscriptBuilder` writes JSONL transcripts under a temp "projects" root, matching exactly
+// the fields design §2 (`docs/superpowers/specs/2026-09-21-ratchet-usage-design.md`) verified on
+// real Claude Code output: `type`, `timestamp`, `sessionId`, `cwd`, `gitBranch`, `version`,
+// `message.model`, `message.usage.{input_tokens,cache_creation_input_tokens,
+// cache_read_input_tokens,output_tokens,output_tokens_details.thinking_tokens}`,
+// `message.content` holding `tool_use` blocks with `id`/`name`. Point `RATCHET_CLAUDE_PROJECTS`
+// at `.root` (see `usage()` below). Every record uses a fixed `version` ("1.2.3") and
+// `gitBranch` ("main") — no scenario in this plan needs either to vary; a scenario that does can
+// still reach into `.root` directly and write its own record.
+
+/// Four token classes plus optional thinking, in the units the fixture's callers already think
+/// in (plain `u64`, not yet abbreviated — that only happens on the way to a terminal).
+pub struct Usage {
+    pub input: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+    pub output: u64,
+    pub thinking: Option<u64>,
+}
+
+// NOTE (Task 1 tension, flagged for the owner): the brief's verbatim code names both this
+// token-tuple builder and the `ratchet usage` process runner below `usage`, which cannot coexist
+// in one module (E0428, no overloading in Rust). Renamed this one -- the smaller, purely-local
+// convenience -- to `tokens`, keeping `usage(sb, tb, args, cwd, extra)` as `usage` since it is
+// the helper named in its own doc comment ("Run `ratchet usage <args>` ... every `usage__*`
+// scenario test goes through this helper") and matches the subcommand name it drives.
+pub fn tokens(input: u64, cache_write: u64, cache_read: u64, output: u64) -> Usage {
+    Usage {
+        input,
+        cache_write,
+        cache_read,
+        output,
+        thinking: None,
+    }
+}
+
+pub struct TranscriptBuilder {
+    pub root: TempDir,
+}
+
+impl TranscriptBuilder {
+    pub fn new() -> Self {
+        TranscriptBuilder {
+            root: TempDir::new().unwrap(),
+        }
+    }
+
+    fn slug(cwd: &Path) -> String {
+        cwd.to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
+    }
+
+    fn transcript_path(&self, cwd: &Path, session_id: &str) -> PathBuf {
+        self.root
+            .path()
+            .join(Self::slug(cwd))
+            .join(format!("{session_id}.jsonl"))
+    }
+
+    fn subagents_dir(&self, cwd: &Path, session_id: &str) -> PathBuf {
+        self.root
+            .path()
+            .join(Self::slug(cwd))
+            .join(session_id)
+            .join("subagents")
+    }
+
+    fn append(path: &Path, record: &Value) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(f, "{record}").unwrap();
+    }
+
+    fn append_raw(path: &Path, line: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
+    fn record(
+        ts: &str,
+        session_id: &str,
+        cwd: &Path,
+        model: &str,
+        u: &Usage,
+        content: Value,
+    ) -> Value {
+        let mut message = json!({ "model": model, "content": content });
+        message["usage"] = json!({
+            "input_tokens": u.input,
+            "cache_creation_input_tokens": u.cache_write,
+            "cache_read_input_tokens": u.cache_read,
+            "output_tokens": u.output,
+        });
+        if let Some(t) = u.thinking {
+            message["usage"]["output_tokens_details"] = json!({ "thinking_tokens": t });
+        }
+        json!({
+            "type": "assistant",
+            "timestamp": ts,
+            "sessionId": session_id,
+            "cwd": cwd.to_string_lossy(),
+            "gitBranch": "main",
+            "version": "1.2.3",
+            "message": message,
+        })
+    }
+
+    /// One assistant call, no `tool_use` blocks.
+    pub fn call(&self, cwd: &Path, session_id: &str, ts: &str, model: &str, u: &Usage) -> &Self {
+        let rec = Self::record(ts, session_id, cwd, model, u, json!([]));
+        Self::append(&self.transcript_path(cwd, session_id), &rec);
+        self
+    }
+
+    /// One assistant call whose content includes one `tool_use` block — used for an `Agent`
+    /// dispatch (ends orientation, and its `id` is what a subagent's `toolUseId` matches) and for
+    /// `Edit`/`Write`/`NotebookEdit` (also ends orientation, no `toolUseId` match needed).
+    #[allow(clippy::too_many_arguments)] // fixture builder, one field per transcript column
+    pub fn call_with_tool(
+        &self,
+        cwd: &Path,
+        session_id: &str,
+        ts: &str,
+        model: &str,
+        u: &Usage,
+        tool_name: &str,
+        tool_use_id: &str,
+    ) -> &Self {
+        let content = json!([{ "type": "tool_use", "id": tool_use_id, "name": tool_name }]);
+        let rec = Self::record(ts, session_id, cwd, model, u, content);
+        Self::append(&self.transcript_path(cwd, session_id), &rec);
+        self
+    }
+
+    /// An assistant record with no `message.usage` key at all — R2's "partial" case.
+    pub fn call_no_usage(&self, cwd: &Path, session_id: &str, ts: &str, model: &str) -> &Self {
+        let rec = json!({
+            "type": "assistant",
+            "timestamp": ts,
+            "sessionId": session_id,
+            "cwd": cwd.to_string_lossy(),
+            "gitBranch": "main",
+            "version": "1.2.3",
+            "message": { "model": model, "content": [] },
+        });
+        Self::append(&self.transcript_path(cwd, session_id), &rec);
+        self
+    }
+
+    /// A line that is not valid JSON — R2's "skipped" case.
+    pub fn garbage(&self, cwd: &Path, session_id: &str) -> &Self {
+        Self::append_raw(
+            &self.transcript_path(cwd, session_id),
+            "not json at all {{{",
+        );
+        self
+    }
+
+    /// A well-formed record whose `type` is not `"assistant"` — ignored, never counted anywhere.
+    pub fn non_assistant(&self, cwd: &Path, session_id: &str) -> &Self {
+        let rec = json!({ "type": "user", "timestamp": "2026-01-01T00:00:00Z" });
+        Self::append(&self.transcript_path(cwd, session_id), &rec);
+        self
+    }
+
+    /// One call in a subagent's own transcript,
+    /// `<slug>/<session_id>/subagents/agent-<agent_id>.jsonl`.
+    pub fn subagent(
+        &self,
+        cwd: &Path,
+        session_id: &str,
+        agent_id: &str,
+        ts: &str,
+        model: &str,
+        u: &Usage,
+    ) -> &Self {
+        let rec = Self::record(ts, session_id, cwd, model, u, json!([]));
+        let path = self
+            .subagents_dir(cwd, session_id)
+            .join(format!("agent-{agent_id}.jsonl"));
+        Self::append(&path, &rec);
+        self
+    }
+
+    /// `agent-<agent_id>.meta.json` next to that subagent transcript.
+    #[allow(clippy::too_many_arguments)] // fixture builder, one field per meta-file column
+    pub fn meta(
+        &self,
+        cwd: &Path,
+        session_id: &str,
+        agent_id: &str,
+        agent_type: &str,
+        description: &str,
+        model: &str,
+        tool_use_id: Option<&str>,
+    ) -> &Self {
+        let mut m = json!({ "agentType": agent_type, "description": description, "model": model });
+        if let Some(id) = tool_use_id {
+            m["toolUseId"] = json!(id);
+        }
+        let path = self
+            .subagents_dir(cwd, session_id)
+            .join(format!("agent-{agent_id}.meta.json"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, m.to_string()).unwrap();
+        self
+    }
+}
+
+/// Run `ratchet usage <args>` against the sandbox, with `RATCHET_CLAUDE_PROJECTS` pointed at the
+/// fixture builder's root. Every `usage__*` scenario test goes through this helper.
+pub fn usage(
+    sb: &Sandbox,
+    tb: &TranscriptBuilder,
+    args: &[&str],
+    cwd: &Path,
+    extra: &[(&str, &str)],
+) -> Output {
+    let mut cmd = Command::new(ratchet_bin());
+    cmd.arg("usage")
+        .args(args)
+        .current_dir(cwd)
+        .env("RATCHET_HOME", sb.home.path())
+        .env("RATCHET_CLAUDE_PROJECTS", tb.root.path())
+        .env_remove("RATCHET_SESSION_ID")
+        .env_remove("RATCHET_NOW")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    cmd.output().unwrap()
+}
+
+/// Inserts a `subagent.start`/`subagent.stop` row directly, bypassing the CLI — the exact shape
+/// group T-0006 ships (see Assumption 1): the row's `task_id` column carries the task; the
+/// payload carries `agent_id`, `agent_type`, `description` only.
+#[allow(clippy::too_many_arguments)] // fixture builder, one field per event-row column
+pub fn seed_subagent_event(
+    sb: &Sandbox,
+    kind: &str,
+    session_id: &str,
+    agent_id: &str,
+    agent_type: &str,
+    description: &str,
+    task_id: &str,
+    ts: &str,
+) {
+    let conn = db(sb);
+    conn.execute(
+        "INSERT INTO events(ts, session_id, task_id, kind, payload, source) VALUES (?1,?2,?3,?4,?5,'hook')",
+        rusqlite::params![
+            ts,
+            session_id,
+            task_id,
+            kind,
+            json!({
+                "agent_id": agent_id,
+                "agent_type": agent_type,
+                "description": description,
+            })
+            .to_string(),
+        ],
+    )
+    .unwrap();
+}
+
+/// True if `text` contains `n` as a standalone number: the byte immediately before and after
+/// every match is not an ASCII digit, `.` or `,` — so `contains_number(text, "40")` cannot be
+/// satisfied by "140", "40.5", "1,400" or "2400". Every scenario that checks a specific total
+/// uses this instead of `str::contains`, so an aggregate that is merely a superstring of the
+/// right digits does not pass (fix round 1, finding 1/4).
+pub fn contains_number(text: &str, n: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut start = 0usize;
+    while let Some(rel) = text[start..].find(n) {
+        let idx = start + rel;
+        let before_ok = idx == 0 || !matches!(bytes[idx - 1], b'0'..=b'9' | b'.' | b',');
+        let end = idx + n.len();
+        let after_ok = end >= bytes.len() || !matches!(bytes[end], b'0'..=b'9' | b'.' | b',');
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
+}
