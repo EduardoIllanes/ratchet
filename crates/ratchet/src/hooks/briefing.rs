@@ -33,6 +33,7 @@ pub fn build(
         short(&session.id),
         session.branch.as_deref().unwrap_or("?")
     );
+    let rules_line = agents_md_line(main_root);
     let map_line = crate::map::briefing_line(main_root);
     let orphans = tasks::orphaned(conn, &session.repo_root, th, now).unwrap_or_default();
     let mine = tasks::list(
@@ -58,12 +59,13 @@ pub fn build(
     .take(MAX_READY)
     .collect();
     if orphans.is_empty() && mine.is_empty() && ready.is_empty() {
-        return match &map_line {
-            Some(l) => format!("{header}\n{l}"),
-            None => header,
-        };
+        let mut lines = vec![header];
+        lines.extend(rules_line.clone());
+        lines.extend(map_line.clone());
+        return lines.join("\n");
     }
     let mut lines = vec![header];
+    lines.extend(rules_line.clone());
     if !mine.is_empty() {
         lines.push("Your tasks in progress:".to_string());
         lines.extend(mine.iter().map(|t| task_line(conn, t, true)));
@@ -83,9 +85,12 @@ pub fn build(
     }
     lines.push(COMMANDS_LINE.to_string());
     // The map line is dropped first (design §4.3): only inserted when the rest already fits.
+    // The rules line (just added above, if any) always stays; it sits right after the header,
+    // so the map line goes one slot further in when both are present.
     if let Some(l) = &map_line {
         if lines.len() < MAX_LINES {
-            lines.insert(1, l.clone());
+            let insert_at = if rules_line.is_some() { 2 } else { 1 };
+            lines.insert(insert_at, l.clone());
         }
     }
     if lines.len() > MAX_LINES {
@@ -94,6 +99,17 @@ pub fn build(
         lines.push(COMMANDS_LINE.to_string());
     }
     lines.join("\n")
+}
+
+/// `Some("rules: AGENTS.md")` when the repo has an `AGENTS.md` at its root; `None` otherwise.
+/// The briefing points at the file once — it never restates what is in it (T-0012, owner
+/// decision: repo rules live in AGENTS.md, nowhere else).
+fn agents_md_line(main_root: &Path) -> Option<String> {
+    if main_root.join("AGENTS.md").is_file() {
+        Some("rules: AGENTS.md".to_string())
+    } else {
+        None
+    }
 }
 
 /// One line for the prompt hook, or nothing at all. Deliberately not scoped to the repo: a session
@@ -442,6 +458,40 @@ mod tests {
             text.contains("map: none — run /ratchet:map for the repo layout"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn agents_md_adds_exactly_one_rules_line_right_after_the_header() {
+        let (conn, session) = setup("session-abcdef0123");
+        let d = tempfile::TempDir::new().unwrap();
+        std::fs::write(d.path().join("AGENTS.md"), "# doctrine\n").unwrap();
+        let text = build(
+            &conn,
+            &session,
+            d.path(),
+            &Thresholds::default(),
+            at("2026-09-16T12:01:00Z"),
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.get(1), Some(&"rules: AGENTS.md"), "{text}");
+        assert_eq!(
+            text.matches("AGENTS.md").count(),
+            1,
+            "the briefing points at the file once, it does not restate it: {text}"
+        );
+    }
+
+    #[test]
+    fn no_agents_md_means_no_rules_line() {
+        let (conn, session) = setup("session-abcdef0123");
+        let text = build(
+            &conn,
+            &session,
+            Path::new("root"),
+            &Thresholds::default(),
+            at("2026-09-16T12:01:00Z"),
+        );
+        assert!(!text.contains("AGENTS.md"), "{text}");
     }
 
     #[test]
