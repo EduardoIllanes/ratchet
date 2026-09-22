@@ -756,6 +756,7 @@ pub fn commit(sb: &Sandbox, files: &[&str], msg: &str) {
 }
 
 /// `HEAD`'s full sha, from the sandbox's repo.
+#[allow(dead_code)] // kept for later map tasks; no scenario calls it yet
 pub fn head_sha(sb: &Sandbox) -> String {
     let out = Command::new("git")
         .args(["-C", &sb.repo.path().to_string_lossy(), "rev-parse", "HEAD"])
