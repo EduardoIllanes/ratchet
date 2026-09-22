@@ -70,6 +70,13 @@ enum Cmd {
     Map {
         #[command(subcommand)]
         cmd: Option<MapCmd>,
+        /// List source files with no header and no note instead of generating.
+        #[arg(long)]
+        missing: bool,
+        /// With --missing, widen to every undescribed file, not just those changed since the
+        /// map's recorded commit.
+        #[arg(long)]
+        all: bool,
     },
     /// Extract text from a local PDF via the external `liteparse` CLI.
     Pdf {
@@ -237,6 +244,8 @@ enum TaskCmd {
 
 #[derive(Subcommand)]
 enum MapCmd {
+    /// Record one description for a header-less file.
+    Note { path: String, sentence: String },
     /// Print the map's freshness line, or `map: current`.
     Status,
 }
@@ -368,8 +377,10 @@ fn main() {
                 cli::task_cmd::unarchive(&env, cwd, session.as_deref(), &id, json)
             }
         },
-        Cmd::Map { cmd } => match cmd {
+        Cmd::Map { cmd, missing, all } => match cmd {
+            Some(MapCmd::Note { path, sentence }) => cli::map_cmd::note(&path, &sentence, cwd),
             Some(MapCmd::Status) => cli::map_cmd::status(cwd),
+            None if missing => cli::map_cmd::missing(all, cwd),
             None => cli::map_cmd::generate(false, &env, cwd),
         },
         Cmd::Pdf { file, pages, ocr } => cli::pdf_cmd::run(&file, pages.as_deref(), ocr, &env),

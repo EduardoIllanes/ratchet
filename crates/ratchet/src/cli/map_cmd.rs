@@ -63,3 +63,38 @@ pub fn status(cwd: Option<PathBuf>) -> i32 {
         Err(_) => 0,
     }
 }
+
+pub fn note(path: &str, sentence: &str, cwd: Option<PathBuf>) -> i32 {
+    let here = cwd.unwrap_or_else(|| PathBuf::from("."));
+    let repo = match find_repo(&here) {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_a_repo(&here),
+        Err(e) => return fail(e),
+    };
+    let mut target = PathBuf::from(path);
+    if !target.is_absolute() {
+        target = here.join(target);
+    }
+    match crate::map::note(&repo.main_root, &target, sentence) {
+        Ok(()) => 0,
+        Err(e) => fail(e),
+    }
+}
+
+pub fn missing(all: bool, cwd: Option<PathBuf>) -> i32 {
+    let here = cwd.unwrap_or_else(|| PathBuf::from("."));
+    let repo = match find_repo(&here) {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_a_repo(&here),
+        Err(e) => return fail(e),
+    };
+    match crate::map::missing(&repo.main_root, &repo.config.map, all) {
+        Ok(files) => {
+            for f in files {
+                println!("{f}");
+            }
+            0
+        }
+        Err(e) => fail(e),
+    }
+}

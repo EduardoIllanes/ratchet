@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use chrono::{DateTime, Utc};
 
 use crate::config::MapSection;
+use crate::repo::is_tracked;
 
 /// A map is context in every prompt; it never grows with the repo (design D-map-cap).
 pub const MAP_LINE_CAP: usize = 150;
@@ -251,7 +252,7 @@ fn header_sentence(path: &Path) -> Option<String> {
     }
 }
 
-// --- notes (full command lands in Task 3; generate() only reads the file here) ---------------
+// --- notes -----------------------------------------------------------------------------------
 
 /// `path: sentence` per line (design D-map-notes). Malformed lines are skipped, not an error —
 /// a hand-edited or partially-written notes file must never break generation.
@@ -266,6 +267,116 @@ fn load_notes(main_root: &Path) -> BTreeMap<String, String> {
         }
     }
     out
+}
+
+fn write_notes(main_root: &Path, notes: &BTreeMap<String, String>) -> Result<(), MapError> {
+    let path = notes_path(main_root);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| err(format!("could not create .ratchet/: {e}")))?;
+    }
+    let mut text = String::new();
+    for (p, s) in notes {
+        text.push_str(&format!("{p}: {s}\n"));
+    }
+    fs::write(&path, text).map_err(|e| err(format!("could not write {}: {e}", path.display())))
+}
+
+/// Drops, silently, any note whose path is no longer in `all_files` (the full tracked list,
+/// before `[map] exclude`), rewriting `.ratchet/map.notes` only when something was actually
+/// dropped. Called once per `generate()` — this is the one place a stale note gets pruned.
+fn prune_notes(
+    main_root: &Path,
+    all_files: &[String],
+) -> Result<BTreeMap<String, String>, MapError> {
+    let notes = load_notes(main_root);
+    if notes.is_empty() {
+        return Ok(notes);
+    }
+    let tracked: std::collections::BTreeSet<&str> = all_files.iter().map(String::as_str).collect();
+    let pruned: BTreeMap<String, String> = notes
+        .iter()
+        .filter(|(k, _)| tracked.contains(k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if pruned.len() != notes.len() {
+        write_notes(main_root, &pruned)?;
+    }
+    Ok(pruned)
+}
+
+/// Records one description for a tracked file, replacing any existing note for the same path.
+/// `target` may be absolute or relative to the process cwd — the CLI face resolves it before
+/// calling this; what lands in `.ratchet/map.notes` is always the repo-root-relative,
+/// case-preserving form (`repo::rel_for_git`), so the notes file stays portable.
+pub fn note(main_root: &Path, target: &Path, sentence: &str) -> Result<(), MapError> {
+    if sentence.is_empty() {
+        return Err(err("sentence must not be empty"));
+    }
+    if sentence.contains('\n') || sentence.chars().count() > 120 {
+        return Err(err(
+            "sentence must be a single line of at most 120 characters",
+        ));
+    }
+    if !is_tracked(main_root, target) {
+        return Err(err(format!("not a tracked file: {}", target.display())));
+    }
+    let rel = crate::repo::rel_for_git(main_root, target)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .ok_or_else(|| err(format!("not a tracked file: {}", target.display())))?;
+    let mut notes = load_notes(main_root);
+    notes.insert(rel, sentence.to_string());
+    write_notes(main_root, &notes)
+}
+
+/// Source files with neither a header nor a note. Full list when `all` or no map exists yet;
+/// otherwise narrowed to files that changed since the map's recorded commit
+/// (`git diff --name-only <recorded>..HEAD`, design §4.1).
+pub fn missing(main_root: &Path, cfg: &MapSection, all: bool) -> Result<Vec<String>, MapError> {
+    let all_files = tracked_files(main_root)?;
+    let files: Vec<String> = all_files
+        .into_iter()
+        .filter(|f| !is_excluded(f, &cfg.exclude))
+        .collect();
+    let (_, source_dirs) = layout_section(&files);
+    let notes = load_notes(main_root);
+    let mut candidates = Vec::new();
+    for f in &files {
+        let ext = Path::new(f)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
+        let recognised_lang = ext
+            .as_deref()
+            .map(|e| style_for(e).is_some())
+            .unwrap_or(false);
+        let under_source = source_dirs.iter().any(|d| f.starts_with(&format!("{d}/")));
+        if !recognised_lang && !under_source {
+            continue;
+        }
+        if notes.contains_key(f) {
+            continue;
+        }
+        if header_sentence(&main_root.join(f)).is_some() {
+            continue;
+        }
+        candidates.push(f.clone());
+    }
+    if all {
+        return Ok(candidates);
+    }
+    let Some(recorded) = recorded_commit(main_root) else {
+        return Ok(candidates); // no map yet: the full list either way
+    };
+    let changed = git_output(
+        main_root,
+        &["diff", "--name-only", &format!("{recorded}..HEAD")],
+    )
+    .unwrap_or_default();
+    let changed_set: std::collections::BTreeSet<&str> = changed.lines().collect();
+    Ok(candidates
+        .into_iter()
+        .filter(|f| changed_set.contains(f.as_str()))
+        .collect())
 }
 
 // --- gate detection (unit-tested directly; only the Cargo branch is scenario-tested) ---------
@@ -614,9 +725,16 @@ pub fn generate(
 ) -> Result<Generated, MapError> {
     let all_files = tracked_files(main_root)?;
     let files: Vec<String> = all_files
-        .into_iter()
+        .iter()
         .filter(|f| !is_excluded(f, &cfg.exclude))
+        .cloned()
         .collect();
+    // A note for a path no longer in the tree is dropped here, silently, before it can leak
+    // into this run's Modules section or linger in `.ratchet/map.notes` (spec: "Notes fill in
+    // where there is no header, and a header always wins" — the stale-note scenario). Pruned
+    // against the full tracked list, not the post-`[map] exclude` `files`, so a note for a file
+    // that merely became excluded (still tracked, just hidden from the map) survives.
+    let notes = prune_notes(main_root, &all_files)?;
 
     let repo_name = main_root
         .file_name()
@@ -640,7 +758,6 @@ pub fn generate(
     };
 
     let (layout, source_dirs) = layout_section(&files);
-    let notes = load_notes(main_root);
     let (rows, with_header, with_note, without) =
         modules_section(main_root, &files, &source_dirs, &notes);
     let tests = tests_section(&files);
@@ -917,5 +1034,30 @@ mod tests {
     fn a_missing_notes_file_is_an_empty_map() {
         let d = tempfile::TempDir::new().unwrap();
         assert!(load_notes(d.path()).is_empty());
+    }
+
+    #[test]
+    fn note_stores_the_repo_relative_form_even_from_an_absolute_target() {
+        let d = repo();
+        fs::write(d.path().join("x.rs"), "fn f() {}").unwrap();
+        git(d.path(), &["add", "x.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "add x"]);
+        note(d.path(), &d.path().join("x.rs"), "Does x.").unwrap();
+        let notes = load_notes(d.path());
+        assert_eq!(notes.get("x.rs"), Some(&"Does x.".to_string()));
+    }
+
+    #[test]
+    fn missing_full_excludes_headered_and_noted_files() {
+        let d = repo();
+        fs::write(d.path().join("a.rs"), "//! Has a header\nfn a() {}").unwrap();
+        fs::write(d.path().join("b.rs"), "fn b() {}").unwrap();
+        fs::write(d.path().join("c.rs"), "fn c() {}").unwrap();
+        git(d.path(), &["add", "a.rs", "b.rs", "c.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "add"]);
+        note(d.path(), &d.path().join("c.rs"), "Has a note.").unwrap();
+        let cfg = MapSection::default();
+        let out = missing(d.path(), &cfg, true).unwrap();
+        assert_eq!(out, vec!["b.rs".to_string()]);
     }
 }
