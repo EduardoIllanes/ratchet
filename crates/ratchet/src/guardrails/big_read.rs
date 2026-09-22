@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::eval::GuardContext;
+use super::segment::tokenize;
 use crate::repo::within;
 
 const READER_COMMANDS: [&str; 5] = ["cat", "head", "tail", "less", "more"];
@@ -69,9 +70,11 @@ fn blocks_command(tool_input: &Value, ctx: &GuardContext) -> bool {
 }
 
 /// Non-flag arguments of a segment whose command is one of `READER_COMMANDS`; empty when the
-/// segment's command is something else.
+/// segment's command is something else. Tokenizes with the shared `segment::tokenize` scanner
+/// (quote-aware, not a full shell parser) so a quoted argument containing a space — `cat "src/my
+/// dir/big file.rs"` — resolves as one token instead of being cut at the space.
 fn reader_command_targets(segment: &str) -> Vec<String> {
-    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    let tokens = tokenize(segment);
     let Some(first) = tokens.first() else {
         return Vec::new();
     };
@@ -83,21 +86,9 @@ fn reader_command_targets(segment: &str) -> Vec<String> {
     tokens[1..]
         .iter()
         .filter(|t| !t.starts_with('-'))
-        .map(|t| strip_quotes(t))
         .filter(|t| !t.is_empty())
+        .cloned()
         .collect()
-}
-
-fn strip_quotes(raw: &str) -> String {
-    let s = raw.trim();
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2
-        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
-    {
-        return s[1..s.len() - 1].to_string();
-    }
-    s.to_string()
 }
 
 fn is_big_outside_worktree(raw: &str, ctx: &GuardContext) -> bool {
@@ -382,6 +373,45 @@ mod tests {
         assert!(!blocks_big_read(
             "Bash",
             &json!({ "command": "grep fn src/big.rs" }),
+            &c
+        ));
+    }
+
+    #[test]
+    fn quoted_command_target_with_a_space_is_still_blocked() {
+        let d = tempfile::TempDir::new().unwrap();
+        let root = d.path();
+        write_lines(&root.join("src/my dir/big file.rs"), 400);
+        let c = ctx(root, root, 350);
+
+        assert!(blocks_big_read(
+            "Bash",
+            &json!({ "command": r#"cat "src/my dir/big file.rs""# }),
+            &c
+        ));
+        assert!(blocks_big_read(
+            "PowerShell",
+            &json!({ "command": r#"cat "src/my dir/big file.rs""# }),
+            &c
+        ));
+    }
+
+    #[test]
+    fn quoted_command_target_untracked_small_or_in_a_worktree_is_allowed() {
+        let d = tempfile::TempDir::new().unwrap();
+        let root = d.path();
+        write_lines(&root.join("src/my dir/small file.rs"), 10);
+        write_lines(&root.join(".worktrees/wt/src/my dir/big file.rs"), 400);
+        let c = ctx(root, root, 350);
+
+        assert!(!blocks_big_read(
+            "Bash",
+            &json!({ "command": r#"cat "src/my dir/small file.rs""# }),
+            &c
+        ));
+        assert!(!blocks_big_read(
+            "Bash",
+            &json!({ "command": r#"cat ".worktrees/wt/src/my dir/big file.rs""# }),
             &c
         ));
     }
