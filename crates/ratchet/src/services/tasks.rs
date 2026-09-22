@@ -380,8 +380,12 @@ pub fn create(
 }
 
 /// Moves a task, checking the table and the evidence `done` needs. One transaction, one event.
+/// `unreviewed` is the owner's escape hatch (`--unreviewed`): it skips the independent-review
+/// check below (the checklist evidence still applies) and leaves a note behind so the bypass is
+/// visible on the board.
 // Consumed by cli::task_cmd (Task 8, `task status`).
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub fn transition(
     conn: &mut Connection,
     task_id: &str,
@@ -389,11 +393,13 @@ pub fn transition(
     source: Source,
     session_id: Option<&str>,
     why: Option<&str>,
+    unreviewed: bool,
     now: DateTime<Utc>,
 ) -> Result<Task, ServiceError> {
-    // G2-P8: transaction first; every precondition — the status/archived checks below and the
-    // checklist read inside `require_done_evidence` — reads through `&tx`, the same locked
-    // snapshot the write commits from.
+    // G2-P8: transaction first; every precondition — the status/archived checks below, the
+    // checklist read inside `require_done_evidence`, and the event history read inside
+    // `require_independent_review` — reads through `&tx`, the same locked snapshot the write
+    // commits from.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let task = get(&tx, task_id)?;
     if task.archived_at.is_some() {
@@ -417,8 +423,22 @@ pub fn transition(
     }
     if to == TaskStatus::Done {
         require_done_evidence(&tx, &task, why)?;
+        if !unreviewed {
+            require_independent_review(&tx, &task)?;
+        }
     }
     set_status_in(&tx, &task, to, source, session_id, why, now)?;
+    if to == TaskStatus::Done && unreviewed {
+        events::emit(
+            &tx,
+            EventKind::Note,
+            &json!({ "text": "done without independent review" }),
+            source,
+            session_id,
+            Some(task_id),
+            now,
+        )?;
+    }
     tx.commit()?;
     get(conn, task_id)
 }
@@ -598,6 +618,106 @@ fn require_done_evidence(
         task.id,
         pending.join("; ")
     )))
+}
+
+/// `done`'s other piece of evidence: a review verdict from a session that did not do the work.
+/// Reads the most recent `review.verdict` event and refuses unless it is `approve` from a session
+/// that is neither the current holder nor any session that ever claimed the task or checked off
+/// one of its items — a self-review by any name.
+// Called only from `transition` above.
+#[allow(dead_code)]
+fn require_independent_review(conn: &Connection, task: &Task) -> Result<(), ServiceError> {
+    // `who` is the session to tell the reviewer to avoid: the verdict's own session when there
+    // is a disqualified verdict to point at (whether it was disqualified for being the current
+    // holder or for a claimed/checklist.done entry in the task's history), and the current
+    // holder only when there is no verdict at all to draw a session from.
+    let missing = |who: Option<&str>| {
+        let who = who
+            .map(short_session)
+            .unwrap_or_else(|| "the session that holds it".to_string());
+        ServiceError::Invalid(format!(
+            "{}: no independent review verdict — have the reviewer run: ratchet task review {} approve \"...\" (from a session other than {who})",
+            task.id, task.id
+        ))
+    };
+    let Some(ev) = latest_review_verdict(conn, &task.id)? else {
+        return Err(missing(task.claimed_by.as_deref()));
+    };
+    let verdict = ev
+        .payload
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if verdict != "approve" {
+        return Err(ServiceError::Invalid(format!(
+            "{}: last verdict is \"{verdict}\" ({}) — fix, then have the reviewer run: ratchet task review {} approve \"...\"",
+            task.id,
+            clock::iso(ev.ts),
+            task.id
+        )));
+    }
+    let reviewer = ev.session_id.as_deref();
+    let disqualified = match reviewer {
+        Some(r) => session_worked_on(conn, &task.id, task.claimed_by.as_deref(), r)?,
+        None => true,
+    };
+    if disqualified {
+        return Err(missing(reviewer.or(task.claimed_by.as_deref())));
+    }
+    Ok(())
+}
+
+/// The most recent `review.verdict` event of a task, if any.
+fn latest_review_verdict(conn: &Connection, task_id: &str) -> Result<Option<Event>, ServiceError> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM events WHERE task_id = ?1 AND kind = ?2 ORDER BY id DESC LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(
+        params![task_id, EventKind::ReviewVerdict.as_str()],
+        Event::from_row,
+    )?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
+}
+
+/// Whether `session` is the task's current holder, or ever recorded a `task.claimed` or
+/// `checklist.done` event on it — the set of sessions too close to the work to review it.
+fn session_worked_on(
+    conn: &Connection,
+    task_id: &str,
+    holder: Option<&str>,
+    session: &str,
+) -> Result<bool, ServiceError> {
+    if holder == Some(session) {
+        return Ok(true);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT 1 FROM events WHERE task_id = ?1 AND session_id = ?2 AND kind IN (?3, ?4) LIMIT 1",
+    )?;
+    Ok(stmt
+        .query_row(
+            params![
+                task_id,
+                session,
+                EventKind::TaskClaimed.as_str(),
+                EventKind::ChecklistDone.as_str()
+            ],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Eight characters are enough to name a session in a refusal message; shorter ids stay whole.
+/// Mirrors `hooks::briefing::short` — kept local so `services` never depends on `hooks`.
+fn short_session(session_id: &str) -> String {
+    if session_id.chars().count() > 8 {
+        format!("{}…", session_id.chars().take(8).collect::<String>())
+    } else {
+        session_id.to_string()
+    }
 }
 
 /// Puts the task in `in_progress` under `session_id`. A task in `backlog` goes through `ready`
@@ -874,6 +994,38 @@ pub fn handoff(
         &tx,
         EventKind::Handoff,
         &json!({ "text": text }),
+        source,
+        session_id,
+        Some(task_id),
+        now,
+    )?;
+    tx.commit()?;
+    Ok(ev)
+}
+
+/// Records an independent review verdict (`approve` or `changes`) with free text, as a
+/// `review.verdict` event. Never changes the task's status — `transition` is the only place that
+/// does that, and it is what reads this event back when `done` is asked for. The recording
+/// session need not be registered: a reviewer profile mints its own session identifier so it is
+/// never mistaken for the implementer's (agent-protocol convention, not a session-registry rule).
+// Consumed by cli::task_cmd (`task review`).
+#[allow(dead_code)]
+pub fn review(
+    conn: &mut Connection,
+    task_id: &str,
+    verdict: &str,
+    text: &str,
+    source: Source,
+    session_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<Event, ServiceError> {
+    // G2-P8: the transaction opens first; the task's existence is read through `&tx`.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    get(&tx, task_id)?;
+    let ev = events::emit(
+        &tx,
+        EventKind::ReviewVerdict,
+        &json!({ "verdict": verdict, "text": text }),
         source,
         session_id,
         Some(task_id),
@@ -1425,6 +1577,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            true,
             ts,
         )
         .unwrap_err();
@@ -1439,6 +1592,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            false,
             ts,
         )
         .unwrap();
@@ -1449,6 +1603,7 @@ mod tests {
             Source::Cli,
             Some("s-1"),
             None,
+            false,
             ts,
         )
         .unwrap();
@@ -1460,6 +1615,7 @@ mod tests {
             Source::Cli,
             Some("s-1"),
             Some("waiting"),
+            false,
             ts,
         )
         .unwrap();
@@ -1491,6 +1647,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            false,
             ts,
         )
         .unwrap();
@@ -1501,6 +1658,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            false,
             ts,
         )
         .unwrap();
@@ -1511,6 +1669,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            true,
             ts,
         )
         .unwrap_err();
@@ -1523,6 +1682,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            false,
             ts,
         )
         .unwrap();
@@ -1533,6 +1693,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            false,
             ts,
         )
         .unwrap();
@@ -1543,6 +1704,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            true,
             ts
         )
         .is_err());
@@ -1553,6 +1715,7 @@ mod tests {
             Source::Cli,
             None,
             Some("obsolete"),
+            true,
             ts,
         )
         .unwrap();
@@ -1571,6 +1734,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            false,
             ts,
         )
         .unwrap();
@@ -1581,6 +1745,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            false,
             ts,
         )
         .unwrap();
@@ -1596,12 +1761,20 @@ mod tests {
             Source::Cli,
             Some("s-1"),
             Some("shipped"),
+            true,
             ts,
         )
         .unwrap();
         assert_eq!(done.claimed_by, None);
-        let last = events::for_task(&c, &task.id, 10).unwrap().pop().unwrap();
-        assert_eq!(last.payload["claim_released"], "s-1");
+        // `--unreviewed` (passed above) appends a note after the status event, so pick the
+        // `task.status` event by kind rather than assuming it is the last one in the history.
+        let status_event = events::for_task(&c, &task.id, 10)
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|e| e.kind == "task.status")
+            .unwrap();
+        assert_eq!(status_event.payload["claim_released"], "s-1");
     }
 
     #[test]
@@ -1618,6 +1791,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            false,
             ts,
         )
         .unwrap();
@@ -1628,6 +1802,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            false,
             ts,
         )
         .unwrap();
@@ -1638,6 +1813,7 @@ mod tests {
             Source::Cli,
             None,
             Some("shipped"),
+            true,
             ts,
         )
         .unwrap();
@@ -1669,6 +1845,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            false,
             ts,
         )
         .unwrap();
@@ -1679,6 +1856,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            false,
             ts,
         )
         .unwrap();
@@ -1689,6 +1867,7 @@ mod tests {
             Source::Cli,
             None,
             Some("shipped"),
+            true,
             ts,
         )
         .unwrap();
@@ -1700,6 +1879,7 @@ mod tests {
             Source::Cli,
             None,
             None,
+            false,
             ts,
         )
         .unwrap_err();
@@ -1794,6 +1974,7 @@ mod tests {
             Source::Cli,
             Some("s-1"),
             Some("shipped"),
+            true,
             ts,
         )
         .unwrap();
@@ -1914,5 +2095,253 @@ mod tests {
             "half done; resume at item 2"
         );
         assert!(note(&mut c, "T-9999", "into the void", Source::Cli, None, ts).is_err());
+    }
+
+    // --- Review verdicts and the gate on done --------------------------------------------------
+
+    /// A task claimed by `s-impl`, checklist complete, ready for a `done` attempt but for the
+    /// review this whole block is about.
+    fn reviewable(ts: DateTime<Utc>) -> (Connection, String) {
+        let mut c = with_session("s-impl", "2026-09-16T12:00:00Z");
+        let items = vec!["one".to_string()];
+        let task = create(&mut c, simple("reviewable", &items), Source::Cli, None, ts).unwrap();
+        claim(
+            &mut c,
+            &task.id,
+            "s-impl",
+            &Thresholds::default(),
+            Source::Cli,
+            ts,
+        )
+        .unwrap();
+        check(&mut c, &task.id, 1, Source::Cli, Some("s-impl"), ts).unwrap();
+        (c, task.id)
+    }
+
+    #[test]
+    fn review_records_a_verdict_event_and_never_touches_status() {
+        let mut c = fresh();
+        let ts = at("2026-09-16T12:00:00Z");
+        let task = create(&mut c, simple("work", &[]), Source::Cli, None, ts).unwrap();
+        let ev = review(
+            &mut c,
+            &task.id,
+            "approve",
+            "looks right",
+            Source::Cli,
+            Some("s-reviewer"),
+            ts,
+        )
+        .unwrap();
+        assert_eq!(ev.kind, "review.verdict");
+        assert_eq!(ev.payload["verdict"], "approve");
+        assert_eq!(ev.payload["text"], "looks right");
+        assert_eq!(get(&c, &task.id).unwrap().status, TaskStatus::Backlog);
+        assert!(review(&mut c, "T-9999", "approve", "x", Source::Cli, None, ts).is_err());
+    }
+
+    #[test]
+    fn done_is_refused_with_no_verdict_at_all() {
+        let ts = at("2026-09-16T12:01:00Z");
+        let (mut c, id) = reviewable(ts);
+        let err = transition(
+            &mut c,
+            &id,
+            TaskStatus::Done,
+            Source::Cli,
+            Some("s-impl"),
+            None,
+            false,
+            ts,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no independent review"), "{err}");
+        assert!(err.to_string().contains("ratchet task review"), "{err}");
+        assert_eq!(get(&c, &id).unwrap().status, TaskStatus::InProgress);
+    }
+
+    #[test]
+    fn done_is_refused_when_the_approve_came_from_the_holding_session() {
+        let ts = at("2026-09-16T12:01:00Z");
+        let (mut c, id) = reviewable(ts);
+        review(
+            &mut c,
+            &id,
+            "approve",
+            "self-reviewed",
+            Source::Cli,
+            Some("s-impl"),
+            ts,
+        )
+        .unwrap();
+        let err = transition(
+            &mut c,
+            &id,
+            TaskStatus::Done,
+            Source::Cli,
+            Some("s-impl"),
+            None,
+            false,
+            ts,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no independent review"), "{err}");
+        // The disqualified verdict came from the holder itself, so naming the holder and naming
+        // the verdict's own session say the same thing here — but the message must still name a
+        // session, not the placeholder fallback for "no verdict at all".
+        assert!(err.to_string().contains("s-impl"), "{err}");
+    }
+
+    #[test]
+    fn done_is_refused_when_the_approve_came_from_a_session_that_checked_off_an_item() {
+        // s-check never claimed or holds the task, but it recorded a checklist.done on it
+        // earlier (a transferred task's history), which is close enough to the work to disqualify
+        // it as an independent reviewer.
+        let ts = at("2026-09-16T12:01:00Z");
+        let (mut c, id) = reviewable(ts);
+        sessions::upsert_start(
+            &mut c,
+            StartInput {
+                session_id: "s-check",
+                repo: "demo",
+                repo_root: "root",
+                cwd: "root",
+                worktree: None,
+                branch: None,
+                mode: SessionMode::Interactive,
+                launched_by: LaunchedBy::User,
+            },
+            ts,
+        )
+        .unwrap();
+        check(&mut c, &id, 1, Source::Cli, Some("s-check"), ts).unwrap();
+        review(
+            &mut c,
+            &id,
+            "approve",
+            "fine",
+            Source::Cli,
+            Some("s-check"),
+            ts,
+        )
+        .unwrap();
+        let err = transition(
+            &mut c,
+            &id,
+            TaskStatus::Done,
+            Source::Cli,
+            Some("s-impl"),
+            None,
+            false,
+            ts,
+        )
+        .unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("no independent review"), "{err}");
+        // The bug this pins: naming the *holder* (s-impl) here would be wrong — s-impl never
+        // reviewed anything. The session that actually disqualified the verdict is s-check,
+        // and the message must say so, not fall back to the task's current holder.
+        assert!(err.contains("s-check"), "{err}");
+        assert!(!err.contains("s-impl"), "{err}");
+    }
+
+    #[test]
+    fn done_is_allowed_after_an_approve_from_another_session() {
+        let ts = at("2026-09-16T12:01:00Z");
+        let (mut c, id) = reviewable(ts);
+        review(
+            &mut c,
+            &id,
+            "approve",
+            "clean diff, gate green",
+            Source::Cli,
+            Some("s-reviewer"),
+            ts,
+        )
+        .unwrap();
+        let done = transition(
+            &mut c,
+            &id,
+            TaskStatus::Done,
+            Source::Cli,
+            Some("s-impl"),
+            None,
+            false,
+            ts,
+        )
+        .unwrap();
+        assert_eq!(done.status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn done_is_refused_when_a_changes_verdict_is_newer_than_the_approve() {
+        let ts = at("2026-09-16T12:01:00Z");
+        let (mut c, id) = reviewable(ts);
+        review(
+            &mut c,
+            &id,
+            "approve",
+            "first pass ok",
+            Source::Cli,
+            Some("s-reviewer"),
+            ts,
+        )
+        .unwrap();
+        let later = at("2026-09-16T12:02:00Z");
+        review(
+            &mut c,
+            &id,
+            "changes",
+            "actually, fix the edge case",
+            Source::Cli,
+            Some("s-reviewer"),
+            later,
+        )
+        .unwrap();
+        let err = transition(
+            &mut c,
+            &id,
+            TaskStatus::Done,
+            Source::Cli,
+            Some("s-impl"),
+            None,
+            false,
+            later,
+        )
+        .unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("\"changes\""), "{err}");
+        // Spells out the literal next command, like the other two refusal branches, not just the
+        // bare word "approve".
+        assert!(err.contains("ratchet task review"), "{err}");
+        assert!(err.contains("approve"), "{err}");
+    }
+
+    #[test]
+    fn unreviewed_bypasses_the_gate_and_leaves_a_visible_note() {
+        let ts = at("2026-09-16T12:01:00Z");
+        let (mut c, id) = reviewable(ts);
+        let done = transition(
+            &mut c,
+            &id,
+            TaskStatus::Done,
+            Source::Cli,
+            Some("s-impl"),
+            None,
+            true,
+            ts,
+        )
+        .unwrap();
+        assert_eq!(done.status, TaskStatus::Done);
+        let notes = events::for_task(&c, &id, 20)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "note")
+            .map(|e| e.payload["text"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            notes.iter().any(|n| n == "done without independent review"),
+            "{notes:?}"
+        );
     }
 }

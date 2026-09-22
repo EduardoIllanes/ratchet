@@ -328,6 +328,7 @@ mod tests {
                         Source::Cli,
                         Some("s-1"),
                         Some("waiting"),
+                        false,
                         at("2026-09-16T12:04:00Z"),
                     )
                     .unwrap();

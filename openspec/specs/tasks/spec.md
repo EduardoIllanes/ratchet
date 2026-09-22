@@ -129,6 +129,65 @@ handoff of a task SHALL be the most recent one and SHALL be available in every v
 - **WHEN** a handoff is recorded with blank text
 - **THEN** the operation is refused asking what is left and how to resume, and nothing is recorded
 
+### Requirement: Review verdicts
+An independent review of a task SHALL be recorded as a verdict — `approve` or `changes` — with
+free text, appended as a `review.verdict` event attributed to the recording session. Recording a
+verdict SHALL NOT change the task's status. The recording session need not be registered (unlike
+claiming a task): a reviewer profile records its own, unregistered session identifier. An unknown
+task or an unknown verdict word SHALL be refused, listing the two valid words.
+
+#### Scenario: Verdict recorded
+- **WHEN** a review verdict of `approve` with text `"looks right"` is recorded against a task
+- **THEN** one `review.verdict` event is appended carrying that verdict and that text, and the
+  task's status is unchanged
+
+### Requirement: Done requires an independent review
+Moving a task to `done` SHALL be refused unless its most recent `review.verdict` event is
+`approve`, recorded by a session that is neither the task's current holder nor any session that
+recorded a `task.claimed` or a `checklist.done` event on it. The refusal SHALL name the exact
+`ratchet task review` command that supplies a valid verdict, and the session to record it from
+other than: the disqualified verdict's own session when there is one to point at (whether it was
+disqualified for holding the task or for a claimed/checklist.done entry in the task's history
+that is not the current holder), and the current holder when there is no verdict at all.
+`ratchet task status <id> done --unreviewed` SHALL bypass this requirement — the checklist
+requirement of "States and transitions" still applies — and SHALL record a note reading "done
+without independent review", so the bypass stays visible on the board.
+
+#### Scenario: Done refused with no verdict
+- **WHEN** a task with a complete checklist and no `review.verdict` event is moved to `done`
+- **THEN** the operation is refused, naming the missing verdict and the `ratchet task review`
+  command that records one
+
+#### Scenario: Done refused when the approve came from the holding session
+- **WHEN** a task's only `review.verdict` event is `approve`, recorded by the session that
+  currently holds the task, and the task is moved to `done`
+- **THEN** the operation is refused for the same reason as a missing verdict, naming that
+  holding session
+
+#### Scenario: Done refused when the approve came from a session that checked off an item
+- **WHEN** a task's most recent `review.verdict` event is `approve`, recorded by a session that
+  never held the task but earlier recorded a `checklist.done` event on it, and the task is moved
+  to `done`
+- **THEN** the operation is refused, naming that session — not the task's current holder, who
+  never reviewed anything
+
+#### Scenario: Done allowed after an approve from another session
+- **WHEN** a task's checklist is complete and its most recent `review.verdict` event is `approve`,
+  recorded by a session that never claimed the task and never checked off one of its items
+- **THEN** the task moves to `done`
+
+#### Scenario: Done refused when a changes verdict is newer than the approve
+- **WHEN** a task received an `approve` from an independent session and then a later `changes`
+  verdict, and the task is moved to `done`
+- **THEN** the operation is refused, naming the `changes` verdict and when it was recorded, and
+  the exact `ratchet task review` command for a fresh `approve`
+
+#### Scenario: --unreviewed succeeds and records the note
+- **WHEN** `ratchet task status <id> done --unreviewed` is run on a task with a complete checklist
+  and no review verdict
+- **THEN** the task moves to `done` and a note reading "done without independent review" is
+  recorded
+
 ### Requirement: Archiving hides, it never deletes
 A `done` task SHALL be archivable, which hides it from listings and from the briefing while keeping
 its history; archiving anything not `done` SHALL be refused. An archived task SHALL be visible on

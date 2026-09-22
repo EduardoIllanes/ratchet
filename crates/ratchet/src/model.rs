@@ -86,6 +86,7 @@ db_enum!(EventKind, Note, {
     ChecklistUndone => "checklist.undone",
     Handoff => "handoff",
     Note => "note",
+    ReviewVerdict => "review.verdict",
     GuardrailMainTreeWrite => "guardrail.main_tree_write",
 });
 
@@ -311,6 +312,7 @@ mod tests {
         assert_eq!(EventKind::ChecklistDone.as_str(), "checklist.done");
         assert_eq!(EventKind::ChecklistUndone.as_str(), "checklist.undone");
         assert_eq!(EventKind::Handoff.as_str(), "handoff");
+        assert_eq!(EventKind::ReviewVerdict.as_str(), "review.verdict");
         assert_eq!(
             EventKind::GuardrailMainTreeWrite.as_str(),
             "guardrail.main_tree_write"

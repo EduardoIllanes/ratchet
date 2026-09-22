@@ -509,6 +509,7 @@ mod tests {
             crate::model::Source::Cli,
             None,
             None,
+            false,
             at("2026-09-16T12:02:00Z"),
         )
         .unwrap();
@@ -521,6 +522,7 @@ mod tests {
             crate::model::Source::Cli,
             None,
             None,
+            false,
             at("2026-09-16T12:03:00Z"),
         )
         .unwrap();
@@ -531,6 +533,7 @@ mod tests {
             crate::model::Source::Cli,
             None,
             None,
+            false,
             at("2026-09-16T12:04:00Z"),
         )
         .unwrap();
@@ -589,6 +592,7 @@ mod tests {
                 crate::model::Source::Cli,
                 None,
                 None,
+                false,
                 at("2026-09-16T12:01:00Z"),
             )
             .unwrap();
@@ -624,6 +628,7 @@ mod tests {
                 crate::model::Source::Cli,
                 None,
                 None,
+                false,
                 at("2026-09-16T12:01:00Z"),
             )
             .unwrap();
@@ -634,6 +639,7 @@ mod tests {
                 crate::model::Source::Cli,
                 None,
                 None,
+                false,
                 at("2026-09-16T12:02:00Z"),
             )
             .unwrap();
