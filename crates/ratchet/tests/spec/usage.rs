@@ -206,7 +206,14 @@ fn usage__two_tasks_held_in_sequence_split_the_session() {
     assert_eq!(
         code(&task(
             &sb,
-            &["status", &t1, "done", "--why", "closing for the test"],
+            &[
+                "status",
+                &t1,
+                "done",
+                "--unreviewed",
+                "--why",
+                "closing for the test"
+            ],
             "s-7",
             6
         )),
@@ -270,7 +277,7 @@ fn usage__calls_outside_any_held_task_are_unassigned() {
     assert_eq!(
         code(&task(
             &sb,
-            &["status", &id, "done", "--why", "closing"],
+            &["status", &id, "done", "--unreviewed", "--why", "closing"],
             "s-8",
             6
         )),
@@ -365,7 +372,7 @@ fn usage__a_subagent_is_attributed_through_tooluseid_when_no_event_exists() {
     assert_eq!(
         code(&task(
             &sb,
-            &["status", &t1, "done", "--why", "closing"],
+            &["status", &t1, "done", "--unreviewed", "--why", "closing"],
             "s-10",
             5
         )),
@@ -826,7 +833,7 @@ fn usage__by_role_aggregates_across_tasks() {
     assert_eq!(
         code(&task(
             &sb,
-            &["status", &t1, "done", "--why", "closing"],
+            &["status", &t1, "done", "--unreviewed", "--why", "closing"],
             "s-21",
             5
         )),
