@@ -290,6 +290,55 @@ fn tasks__a_position_that_does_not_exist() {
     );
 }
 
+// --- Requirement: Checking several items in one call -----------------------------------------
+
+#[test]
+fn tasks__checking_several_items_in_one_call() {
+    let sb = board("s-30");
+    let id = new_task(&sb, "three criteria", &["one", "two", "three"], "s-30", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-30", 2)), 0);
+    let out = task(&sb, &["check", &id, "1", "2", "3"], "s-30", 3);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    for pos in 1..=3 {
+        let (done, by): (i64, Option<String>) = db(&sb)
+            .query_row(
+                "SELECT done, done_by_session FROM checklist_items WHERE task_id = ?1 AND position = ?2",
+                rusqlite::params![id, pos],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(done, 1, "item {pos} not done");
+        assert_eq!(by.as_deref(), Some("s-30"), "item {pos}");
+    }
+    let events = payloads_of(&sb, &id, "checklist.done");
+    assert_eq!(events.len(), 3, "{events:?}");
+    // In order: position 1's payload first, then 2, then 3.
+    assert!(events[0].contains("\"position\":1"), "{events:?}");
+    assert!(events[1].contains("\"position\":2"), "{events:?}");
+    assert!(events[2].contains("\"position\":3"), "{events:?}");
+}
+
+#[test]
+fn tasks__a_bad_number_in_a_batch_refuses_the_whole_call() {
+    let sb = board("s-31");
+    let id = new_task(&sb, "three criteria", &["one", "two", "three"], "s-31", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-31", 2)), 0);
+    let out = task(&sb, &["check", &id, "1", "9"], "s-31", 3);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("1"), "{err}");
+    assert!(err.contains("3"), "{err}");
+    let (done, _): (i64, Option<String>) = db(&sb)
+        .query_row(
+            "SELECT done, done_by_session FROM checklist_items WHERE task_id = ?1 AND position = 1",
+            rusqlite::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(done, 0, "item 1 was marked despite the refusal");
+    assert!(payloads_of(&sb, &id, "checklist.done").is_empty());
+}
+
 // --- Requirement: Progress is derived -------------------------------------------------------
 
 #[test]
@@ -379,6 +428,60 @@ fn tasks__an_empty_handoff_is_refused() {
         stderr(&out)
     );
     assert!(payloads_of(&sb, &id, "handoff").is_empty());
+}
+
+// --- Requirement: Recording several notes in one call -----------------------------------------
+
+#[test]
+fn tasks__recording_several_notes_in_one_call() {
+    let sb = board("s-32");
+    let id = new_task(&sb, "needs two notes", &[], "s-32", 1);
+    let out = task(&sb, &["note", &id, "first", "second"], "s-32", 2);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let notes = payloads_of(&sb, &id, "note");
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(notes[0].contains("first"), "{notes:?}");
+    assert!(notes[1].contains("second"), "{notes:?}");
+}
+
+// --- Requirement: A handoff can carry a status transition --------------------------------------
+
+#[test]
+fn tasks__a_handoff_moves_the_task_when_the_transition_is_valid() {
+    let sb = board("s-33");
+    let id = new_task(&sb, "handoff to review", &[], "s-33", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-33", 2)), 0);
+    let out = task(
+        &sb,
+        &["handoff", &id, "moving to review", "--status", "review"],
+        "s-33",
+        3,
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(task_state(&sb, &id).0, "review");
+    let handoffs = payloads_of(&sb, &id, "handoff");
+    assert_eq!(handoffs.len(), 1);
+    assert!(handoffs[0].contains("moving to review"), "{handoffs:?}");
+}
+
+#[test]
+fn tasks__a_refused_transition_after_a_handoff_still_records_the_handoff() {
+    let sb = board("s-34");
+    let id = new_task(&sb, "two criteria", &["write it", "test it"], "s-34", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-34", 2)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-34", 3)), 0);
+    let out = task(
+        &sb,
+        &["handoff", &id, "not done yet", "--status", "done"],
+        "s-34",
+        4,
+    );
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    assert!(stderr(&out).contains("test it"), "{}", stderr(&out));
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
+    let handoffs = payloads_of(&sb, &id, "handoff");
+    assert_eq!(handoffs.len(), 1, "handoff was not recorded: {handoffs:?}");
+    assert!(handoffs[0].contains("not done yet"), "{handoffs:?}");
 }
 
 // --- Requirement: Review verdicts -------------------------------------------------------------
