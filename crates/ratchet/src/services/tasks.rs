@@ -837,7 +837,7 @@ pub fn claim(
     get(conn, task_id)
 }
 
-// Consumed by cli::task_cmd (Task 8, `task check`).
+// Consumed by cli::task_cmd (Task 8, `task check`) and hooks (single-item callers).
 #[allow(dead_code)]
 pub fn check(
     conn: &mut Connection,
@@ -850,7 +850,7 @@ pub fn check(
     set_item(conn, task_id, position, true, source, session_id, now)
 }
 
-// Consumed by cli::task_cmd (Task 8, `task check --undo`).
+// Consumed by cli::task_cmd (Task 8, `task check --undo`) and hooks (single-item callers).
 #[allow(dead_code)]
 pub fn uncheck(
     conn: &mut Connection,
@@ -861,6 +861,126 @@ pub fn uncheck(
     now: DateTime<Utc>,
 ) -> Result<ChecklistItem, ServiceError> {
     set_item(conn, task_id, position, false, source, session_id, now)
+}
+
+/// `ratchet task check <id> <n> [<n> ...]`: marks every position done, in order, one
+/// `checklist.done` event each. Every position is validated against the checklist read at the
+/// start of the one transaction this runs in, before any write happens — a bad number anywhere
+/// in the batch refuses the whole call, exactly as it would refuse a single bad number, and no
+/// item is marked (T-0010).
+// Consumed by cli::task_cmd (`task check` with several positions).
+#[allow(dead_code)]
+pub fn check_many(
+    conn: &mut Connection,
+    task_id: &str,
+    positions: &[i64],
+    source: Source,
+    session_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<Vec<ChecklistItem>, ServiceError> {
+    set_items(conn, task_id, positions, true, source, session_id, now)
+}
+
+/// The `--undo` twin of `check_many`.
+// Consumed by cli::task_cmd (`task check --undo` with several positions).
+#[allow(dead_code)]
+pub fn uncheck_many(
+    conn: &mut Connection,
+    task_id: &str,
+    positions: &[i64],
+    source: Source,
+    session_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<Vec<ChecklistItem>, ServiceError> {
+    set_items(conn, task_id, positions, false, source, session_id, now)
+}
+
+/// Marks or unmarks several items in one transaction, in the order given. Every position is
+/// checked against the checklist read at the top of the transaction before any `UPDATE` runs, so
+/// a bad number refuses the whole call before writing anything (T-0010's batching requirement).
+// Called only from `check_many`/`uncheck_many` above.
+#[allow(dead_code)]
+fn set_items(
+    conn: &mut Connection,
+    task_id: &str,
+    positions: &[i64],
+    done: bool,
+    source: Source,
+    session_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<Vec<ChecklistItem>, ServiceError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let items = checklist(&tx, task_id)?;
+    if items.is_empty() {
+        get(&tx, task_id)?; // NotFound if the task itself is the problem
+        return Err(ServiceError::Invalid(format!("{task_id} has no checklist")));
+    }
+    for position in positions {
+        if !items.iter().any(|i| i.position == *position) {
+            let listed = items
+                .iter()
+                .map(|i| format!("{}. {}", i.position, i.text))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(ServiceError::Invalid(format!(
+                "{task_id} has no item {position}; available: {listed}"
+            )));
+        }
+    }
+    let ts = clock::iso(now);
+    for position in positions {
+        let item = items.iter().find(|i| i.position == *position).unwrap();
+        // Keyed by (task_id, position), not `item.id`: same defect-class guard as `set_item`
+        // above (G2-P8) — 0 rows means the item vanished between the read above and this write.
+        let affected = tx.execute(
+            "UPDATE checklist_items SET done = ?1, done_by_session = ?2, done_at = ?3 \
+             WHERE task_id = ?4 AND position = ?5",
+            params![
+                i64::from(done),
+                if done { session_id } else { None },
+                if done { Some(ts.as_str()) } else { None },
+                task_id,
+                position
+            ],
+        )?;
+        if affected == 0 {
+            return Err(ServiceError::NotFound(format!(
+                "{task_id} has no item {position}"
+            )));
+        }
+        events::emit(
+            &tx,
+            if done {
+                EventKind::ChecklistDone
+            } else {
+                EventKind::ChecklistUndone
+            },
+            &json!({ "item_id": item.id, "position": position, "text": item.text }),
+            source,
+            session_id,
+            Some(task_id),
+            now,
+        )?;
+    }
+    tx.execute(
+        "UPDATE tasks SET updated_at = ?1 WHERE id = ?2",
+        params![ts, task_id],
+    )?;
+    tx.commit()?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM checklist_items WHERE task_id = ?1 ORDER BY position")?;
+    let rows = stmt.query_map(params![task_id], ChecklistItem::from_row)?;
+    let fresh: Vec<ChecklistItem> = rows.collect::<Result<_, _>>()?;
+    Ok(positions
+        .iter()
+        .map(|position| {
+            fresh
+                .iter()
+                .find(|i| i.position == *position)
+                .cloned()
+                .expect("just written above")
+        })
+        .collect())
 }
 
 /// Marks or unmarks one item. The `updated_at` bump of the task belongs to the same fact as the
@@ -968,6 +1088,37 @@ pub fn note(
     )?;
     tx.commit()?;
     Ok(ev)
+}
+
+/// `ratchet task note <id> "<text>" ["<text>" ...]`: appends one `note` event per text, in the
+/// order given, in one transaction — the task's existence is checked once, up front, so a bad
+/// task id refuses the whole call the same way a single `note` call already does (T-0010).
+// Consumed by cli::task_cmd (`task note` with several texts).
+#[allow(dead_code)]
+pub fn note_many(
+    conn: &mut Connection,
+    task_id: &str,
+    texts: &[String],
+    source: Source,
+    session_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<Vec<Event>, ServiceError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    get(&tx, task_id)?;
+    let mut out = Vec::with_capacity(texts.len());
+    for text in texts {
+        out.push(events::emit(
+            &tx,
+            EventKind::Note,
+            &json!({ "text": text }),
+            source,
+            session_id,
+            Some(task_id),
+            now,
+        )?);
+    }
+    tx.commit()?;
+    Ok(out)
 }
 
 /// The text the next session reads first, so it is never allowed to be empty.
