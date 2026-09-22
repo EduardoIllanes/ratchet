@@ -168,8 +168,9 @@ segment is not part of a pipe. The message SHALL name three alternatives: `Read`
 lines wanted. The rule SHALL NOT apply to a file inside the repo's worktrees directory (that is
 where implementers read whole files), to a file that does not exist, or to a segment with a
 pipe. Like every built-in it SHALL be disableable by id and its threshold SHALL be
-overridable per repo. Counting lines SHALL cost one read of the file and SHALL not run for
-files under the threshold size in bytes (`big_read_lines × 16`), so the hot path stays under
+overridable per repo. Counting lines SHALL skip the read entirely when the file's size in bytes
+is at most `big_read_lines` (a file cannot have more lines than bytes), and otherwise SHALL read
+the file once, stopping as soon as the count passes the threshold, so the hot path stays under
 the latency ceiling.
 
 #### Scenario: Read of a big main-tree file blocked
