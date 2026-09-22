@@ -46,9 +46,10 @@ pub struct GuardrailsSection {
     pub big_read_lines: usize,
     /// Rules declared inline, right in `ratchet.toml`, rather than in a separate `extra` file.
     /// Shape (unknown keys) is refused here by `deny_unknown_fields`; the semantic checks — a
-    /// non-empty `message` that states the alternative, a `match` that compiles — are refused by
-    /// `guardrails::rules::load_rule_set`, the same place the `extra` file's rules are validated
-    /// (T-0012).
+    /// `name` that does not collide with a built-in id, a non-empty `message` that states the
+    /// alternative, a `tools` list that is not explicitly empty, a `match` that compiles — are
+    /// refused by `guardrails::rules::load_rule_set`, the same place the `extra` file's rules
+    /// are validated (T-0012, T-0015).
     pub rules: Vec<CustomRuleDecl>,
 }
 
@@ -67,6 +68,10 @@ impl Default for GuardrailsSection {
 /// `ratchet.toml` instead of a separate `extra` file. Always a `command`-kind rule (the same
 /// matcher the built-in command rules use, over each command segment) — `kind`, `exempt` and
 /// `requires` are not offered here; a repo that needs them uses the `extra` file schema instead.
+/// Because it is command-only, `name` SHALL NOT equal a built-in id (`python-venv`,
+/// `git-destructive`, `env-files`, `main-tree`, `big-read`): `merge()`'s same-id-replaces
+/// semantics would otherwise swap a non-command built-in out for a rule that can never match,
+/// silently disabling it (T-0015); checked by `guardrails::rules::load_rule_set`, not here.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CustomRuleDecl {
@@ -77,7 +82,8 @@ pub struct CustomRuleDecl {
     /// SHALL itself state the alternative (contain a form of "use" or "instead"); checked by
     /// `guardrails::rules::load_rule_set`, not here.
     pub message: String,
-    /// Defaults to `["Bash", "PowerShell"]` when omitted.
+    /// Defaults to `["Bash", "PowerShell"]` when omitted; when given, SHALL NOT be empty
+    /// (checked by `guardrails::rules::load_rule_set`, not here).
     #[serde(default)]
     pub tools: Option<Vec<String>>,
 }

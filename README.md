@@ -148,6 +148,12 @@ alternative (say "use" or "instead") or the file is refused on load:
     match = '^\s*curl\b'
     message = "Use the repo's fetch script instead."
 
+Inline rules are always command-only, so `name` must not equal a built-in id (`python-venv`,
+`git-destructive`, `env-files`, `main-tree`, `big-read`) — that would silently replace a
+non-command built-in with one that can never match. Reusing an id, or giving an explicit empty
+`tools = []`, is refused on load naming the rule and the alternative (rename it, or disable the
+built-in with `off = [...]`).
+
 Known behaviour, by design: command rules split on `;` only outside quotes, so a quoted
 `"done; mypy clean"` does not trip `python-venv`; but a `content` rule scans what will be
 written, so quoting a blocked pattern in documentation blocks that write too.

@@ -146,14 +146,36 @@ fn states_alternative(message: &str) -> bool {
 }
 
 /// Converts one `[[guardrails.rules]]` declaration into the internal `Rule` shape, validating
-/// what `deny_unknown_fields` cannot: a non-empty `message` that states the alternative, and a
-/// `match` pattern that compiles. `alternative` is left empty — the declared `message` already
-/// carries it — so `Violation::render` prints the message alone instead of duplicating it.
-fn custom_rule(decl: &config::CustomRuleDecl, marker_path: &Path) -> Result<Rule, ConfigError> {
+/// what `deny_unknown_fields` cannot: a `name` that does not collide with a built-in id, a
+/// non-empty `message` that states the alternative, a `tools` list that is not explicitly
+/// empty, and a `match` pattern that compiles. `alternative` is left empty — the declared
+/// `message` already carries it — so `Violation::render` prints the message alone instead of
+/// duplicating it.
+fn custom_rule(
+    decl: &config::CustomRuleDecl,
+    marker_path: &Path,
+    builtin_ids: &[String],
+) -> Result<Rule, ConfigError> {
     let err = |message: String| ConfigError {
         path: marker_path.to_path_buf(),
         message,
     };
+    // An inline rule is always `Kind::Command` (see `CustomRuleDecl`), so reusing a built-in's
+    // id would not extend it — `merge()`'s same-id-replaces semantics would swap the built-in
+    // out for a command-only rule in its place. For a non-command built-in (`env-files`,
+    // `main-tree`, `big-read`) that silently guts the protection: it stops matching anything a
+    // Write/Edit ever populates in `tool_input.command`, with no warning. Refuse it instead, the
+    // same way an `extra`-file collision is left legal (that schema lets the override state its
+    // own `kind` deliberately, so it is not the footgun this is).
+    if builtin_ids.iter().any(|id| id == &decl.name) {
+        return Err(err(format!(
+            "rule `{}`: this name is a built-in guardrail id; an inline `[[guardrails.rules]]` \
+             rule is command-only and would silently replace the built-in instead of extending \
+             it. Rename this rule, or disable the built-in with `off = [\"{}\"]` under \
+             [guardrails] in ratchet.toml",
+            decl.name, decl.name
+        )));
+    }
     if decl.message.trim().is_empty() {
         return Err(err(format!(
             "rule `{}`: message must not be empty",
@@ -165,6 +187,15 @@ fn custom_rule(decl: &config::CustomRuleDecl, marker_path: &Path) -> Result<Rule
             "rule `{}`: message must state the alternative (e.g. contain \"use\" or \"instead\")",
             decl.name
         )));
+    }
+    if let Some(tools) = &decl.tools {
+        if tools.is_empty() {
+            return Err(err(format!(
+                "rule `{}`: `tools` must not be empty; omit it for the default (Bash, \
+                 PowerShell), or list at least one tool",
+                decl.name
+            )));
+        }
     }
     fancy_regex::Regex::new(&format!("(?im){}", decl.match_pattern))
         .map_err(|e| err(format!("rule `{}`: invalid match regex: {e}", decl.name)))?;
@@ -203,6 +234,10 @@ pub fn merge(mut base: Vec<Rule>, extra: Vec<Rule>) -> Vec<Rule> {
 #[allow(dead_code)]
 pub fn load_rule_set(home: &Path, repo: Option<&Repo>) -> Result<RuleSet, ConfigError> {
     let mut rules = builtin_rules();
+    // Fixed at the built-in set (not whatever `rules` grows into below): an inline rule is
+    // refused for colliding with one of these five ids specifically, regardless of what a
+    // machine or repo `extra` file layers on top.
+    let builtin_ids: Vec<String> = rules.iter().map(|r| r.id.clone()).collect();
     let machine = config::load_machine_config(home)?;
     if let Some(extra) = machine.guardrails.extra {
         let path = resolve(&extra, home);
@@ -215,12 +250,14 @@ pub fn load_rule_set(home: &Path, repo: Option<&Repo>) -> Result<RuleSet, Config
             rules = merge(rules, load_rules_file(&path, "repo")?);
         }
         // Inline `[[guardrails.rules]]` rules evaluate after everything above — appended last,
-        // so an earlier rule (built-in or `extra`) with an overlapping pattern still wins.
+        // so an earlier rule (built-in or `extra`) with an overlapping pattern still wins. A
+        // name that collides with a built-in id is not an overlap to resolve this way; it is
+        // refused by `custom_rule` before it ever reaches `merge`.
         if !repo.config.guardrails.rules.is_empty() {
             let marker_path = repo.main_root.join(config::MARKER);
             let mut custom = Vec::with_capacity(repo.config.guardrails.rules.len());
             for decl in &repo.config.guardrails.rules {
-                custom.push(custom_rule(decl, &marker_path)?);
+                custom.push(custom_rule(decl, &marker_path, &builtin_ids)?);
             }
             rules = merge(rules, custom);
         }
@@ -242,6 +279,12 @@ fn resolve(p: &str, base: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// The five built-in ids, for tests exercising `custom_rule`'s collision check without
+    /// caring about the machine/repo `extra` layers `load_rule_set` adds on top.
+    fn builtin_ids() -> Vec<String> {
+        super::builtin_rules().into_iter().map(|r| r.id).collect()
+    }
 
     // T-0012, Rule 1 audit: every built-in block message names the alternative the agent should
     // use, so it corrects itself in one attempt. Builtin.toml already separates `message` and
@@ -267,9 +310,50 @@ mod tests {
             message: "   ".into(),
             tools: None,
         };
-        let err = custom_rule(&decl, Path::new("ratchet.toml")).unwrap_err();
+        let err = custom_rule(&decl, Path::new("ratchet.toml"), &builtin_ids()).unwrap_err();
         assert!(err.message.contains('x'), "{}", err.message);
         assert!(err.message.contains("empty"), "{}", err.message);
+    }
+
+    #[test]
+    fn custom_rule_colliding_with_a_command_kind_builtin_id_is_refused() {
+        let decl = config::CustomRuleDecl {
+            name: "git-destructive".into(),
+            match_pattern: "never-matches-anything".into(),
+            message: "use x instead".into(),
+            tools: None,
+        };
+        let err = custom_rule(&decl, Path::new("ratchet.toml"), &builtin_ids()).unwrap_err();
+        assert!(err.to_string().contains("ratchet.toml"), "{err}");
+        assert!(err.message.contains("git-destructive"), "{}", err.message);
+        assert!(err.message.contains("off"), "{}", err.message);
+    }
+
+    #[test]
+    fn custom_rule_colliding_with_a_non_command_builtin_id_is_refused() {
+        for id in ["env-files", "main-tree", "big-read"] {
+            let decl = config::CustomRuleDecl {
+                name: id.into(),
+                match_pattern: "never-matches-anything".into(),
+                message: "use x instead".into(),
+                tools: None,
+            };
+            let err = custom_rule(&decl, Path::new("ratchet.toml"), &builtin_ids()).unwrap_err();
+            assert!(err.message.contains(id), "{}", err.message);
+        }
+    }
+
+    #[test]
+    fn custom_rule_with_empty_tools_is_refused() {
+        let decl = config::CustomRuleDecl {
+            name: "no-curl".into(),
+            match_pattern: "^curl".into(),
+            message: "Use the fetch script instead.".into(),
+            tools: Some(vec![]),
+        };
+        let err = custom_rule(&decl, Path::new("ratchet.toml"), &builtin_ids()).unwrap_err();
+        assert!(err.message.contains("no-curl"), "{}", err.message);
+        assert!(err.message.contains("tools"), "{}", err.message);
     }
 
     #[test]
@@ -280,7 +364,7 @@ mod tests {
             message: "Curl is not allowed here.".into(),
             tools: None,
         };
-        let err = custom_rule(&decl, Path::new("ratchet.toml")).unwrap_err();
+        let err = custom_rule(&decl, Path::new("ratchet.toml"), &builtin_ids()).unwrap_err();
         assert!(err.message.contains("no-curl"), "{}", err.message);
         assert!(err.message.contains("alternative"), "{}", err.message);
     }
@@ -293,7 +377,7 @@ mod tests {
             message: "Use y instead.".into(),
             tools: None,
         };
-        let err = custom_rule(&decl, Path::new("g.toml")).unwrap_err();
+        let err = custom_rule(&decl, Path::new("g.toml"), &builtin_ids()).unwrap_err();
         assert!(err.to_string().contains("g.toml"), "{err}");
         assert!(
             err.message.contains("invalid match regex"),
@@ -310,7 +394,7 @@ mod tests {
             message: "Use the repo's fetch script instead.".into(),
             tools: None,
         };
-        let rule = custom_rule(&decl, Path::new("ratchet.toml")).unwrap();
+        let rule = custom_rule(&decl, Path::new("ratchet.toml"), &builtin_ids()).unwrap();
         assert_eq!(rule.id, "no-curl");
         assert_eq!(
             rule.tools,
@@ -330,7 +414,7 @@ mod tests {
             message: "Use the repo's fetch script instead.".into(),
             tools: Some(vec!["Bash".to_string()]),
         };
-        let rule = custom_rule(&decl, Path::new("ratchet.toml")).unwrap();
+        let rule = custom_rule(&decl, Path::new("ratchet.toml"), &builtin_ids()).unwrap();
         assert_eq!(rule.tools, vec!["Bash".to_string()]);
     }
 
