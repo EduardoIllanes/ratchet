@@ -53,17 +53,22 @@ impl Totals {
     }
 }
 
-/// `k`/`M` with one decimal, per design §4's column rule. Below 1000 prints as-is.
+/// `k`/`M` with one decimal, per design §4's column rule. Below 1000 prints as-is. The `k` form
+/// is computed first and only used when it does not itself round to `1000.0` or more (e.g.
+/// `999_950` prints `1.0M`, not `1000.0k`) — the fix for a rounding edge the first pass missed.
 // Consumed by cli::usage_cmd (Task 4).
 #[allow(dead_code)]
 pub fn abbreviate(n: u64) -> String {
     if n < 1000 {
-        n.to_string()
-    } else if n < 1_000_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
+        return n.to_string();
     }
+    if n < 1_000_000 {
+        let k = n as f64 / 1_000.0;
+        if (k * 10.0).round() / 10.0 < 1000.0 {
+            return format!("{:.1}k", k);
+        }
+    }
+    format!("{:.1}M", n as f64 / 1_000_000.0)
 }
 
 /// "7d" / "30d" / an RFC 3339 date (`2026-09-01`, midnight UTC). The caller supplies the default
@@ -129,16 +134,22 @@ pub struct Hold {
     pub end: Option<DateTime<Utc>>,
 }
 
-/// R3: a hold opens on `task.claimed` and closes on the first `task.status` event for that same
-/// task whose `to` is `done`, `blocked` or `ready`, or at `session_end`, whichever comes first.
-/// `review` does NOT close a hold (Assumption 3, settled): fix rounds after a verdict happen
-/// with the task still in `review` and belong to it. A `task.status` event to `in_progress`
-/// (or `review`) is a no-op here. A fresh `task.claimed` on a task already held opens a second
-/// hold on it, harmless under "most recently claimed wins". Several holds
-/// may be open at once (a session that claims a second task before releasing the first); no
-/// hold's `end` is ever truncated by a later claim — `task_at` below is what implements "the
-/// most recently claimed wins" for an instant covered by more than one open hold, by
-/// construction, without this function needing a stack-pop/reactivate step.
+/// R3: a hold opens on `task.claimed`. A `task.status` event for that same task whose `to` is
+/// `done`, `blocked` or `ready` closes EVERY hold currently open on that task at that timestamp
+/// — not just the oldest one. A session may re-claim a task it already holds
+/// (`services::tasks::claim` allows this, emitting a second `task.claimed` with no status event
+/// in between), leaving two open holds on the same task; a single closing status event ends both
+/// of them, so no duplicate hold is left open past that point (fix round 1: the earlier
+/// oldest-match-only close left the duplicate open until `session_end`, misattributing every
+/// later call to a task already marked done). Every hold still open once all events are
+/// processed closes at `session_end`, whichever comes first for it. `review` does NOT close a
+/// hold (Assumption 3, settled): fix rounds after a verdict happen with the task still in
+/// `review` and belong to it. A `task.status` event to `in_progress` (or `review`) is a no-op
+/// here. Several holds may be open at once for different tasks too (a session that claims a
+/// second task before releasing the first); no hold's `end` is ever truncated by a later claim
+/// on a different task — `task_at` below is what implements "the most recently claimed wins" for
+/// an instant covered by more than one open hold, by construction, without this function needing
+/// a stack-pop/reactivate step.
 // Consumed by cli::usage_cmd (Task 4).
 #[allow(dead_code)]
 pub fn holds(events: &[SessionEvent], session_end: Option<DateTime<Utc>>) -> Vec<Hold> {
@@ -158,10 +169,15 @@ pub fn holds(events: &[SessionEvent], session_end: Option<DateTime<Utc>>) -> Vec
             SessionEventKind::Status { task, to }
                 if matches!(to.as_str(), "done" | "blocked" | "ready") =>
             {
-                if let Some(pos) = open.iter().position(|h| &h.task == task) {
-                    let mut h = open.remove(pos);
-                    h.end = Some(ev.ts);
-                    closed.push(h);
+                let mut i = 0;
+                while i < open.len() {
+                    if &open[i].task == task {
+                        let mut h = open.remove(i);
+                        h.end = Some(ev.ts);
+                        closed.push(h);
+                    } else {
+                        i += 1;
+                    }
                 }
             }
             SessionEventKind::Status { .. } => {}
@@ -258,7 +274,10 @@ pub struct SubagentEvent {
 /// either way). `parent_agent_calls` are the parent's own calls that carry
 /// an `Agent` `tool_use`, as `(tool_use_id, ts)` pairs. `parent_holds` are the parent session's
 /// holds (`holds()`, above). Returns `(task, role)`; `role` is not yet display-formatted — pass
-/// it through `display_role` before printing.
+/// it through `display_role` before printing. `role` resolves on its own chain, independent of
+/// which of the three steps below resolves `task` (spec Requirement 4): `event`'s `agent_type`,
+/// else `meta`'s `agentType`, else `"subagent"` — so an event with no `agent_type` still falls
+/// back to the meta file's, rather than jumping straight to `"subagent"` (fix round 1).
 // Consumed by cli::usage_cmd (Task 4).
 #[allow(dead_code)]
 pub fn subagent_task_and_role(
@@ -268,28 +287,23 @@ pub fn subagent_task_and_role(
     parent_agent_calls: &[(String, DateTime<Utc>)],
     first_record_ts: Option<DateTime<Utc>>,
 ) -> (Option<String>, String) {
+    let role = event
+        .and_then(|ev| ev.agent_type.clone())
+        .or_else(|| meta.and_then(|m| m.agent_type.clone()))
+        .unwrap_or_else(|| "subagent".to_string());
+
     if let Some(ev) = event {
-        let role = ev
-            .agent_type
-            .clone()
-            .unwrap_or_else(|| "subagent".to_string());
         return (ev.task.clone(), role);
     }
     if let Some(tu_id) = meta.and_then(|m| m.tool_use_id.as_deref()) {
         if let Some((_, ts)) = parent_agent_calls.iter().find(|(id, _)| id == tu_id) {
             let task = task_at(parent_holds, *ts).map(str::to_string);
-            let role = meta
-                .and_then(|m| m.agent_type.clone())
-                .unwrap_or_else(|| "subagent".to_string());
             return (task, role);
         }
     }
     let task = first_record_ts
         .and_then(|ts| task_at(parent_holds, ts))
         .map(str::to_string);
-    let role = meta
-        .and_then(|m| m.agent_type.clone())
-        .unwrap_or_else(|| "subagent".to_string());
     (task, role)
 }
 
@@ -650,6 +664,73 @@ mod tests {
         assert_eq!(task_at(&h, at("2026-09-16T12:05:00Z")), Some("T-0001"));
     }
 
+    #[test]
+    fn a_reclaim_of_an_already_held_task_leaves_no_duplicate_hold_open_past_the_close() {
+        let events = vec![
+            SessionEvent {
+                ts: at("2026-09-16T12:00:00Z"),
+                kind: SessionEventKind::Claimed {
+                    task: "T-0001".into(),
+                },
+            },
+            SessionEvent {
+                ts: at("2026-09-16T12:05:00Z"),
+                kind: SessionEventKind::Claimed {
+                    task: "T-0001".into(),
+                },
+            },
+            SessionEvent {
+                ts: at("2026-09-16T12:10:00Z"),
+                kind: SessionEventKind::Status {
+                    task: "T-0001".into(),
+                    to: "done".into(),
+                },
+            },
+        ];
+        let h = holds(&events, None);
+        assert_eq!(task_at(&h, at("2026-09-16T12:09:00Z")), Some("T-0001"));
+        assert_eq!(task_at(&h, at("2026-09-16T12:10:00Z")), None);
+        assert_eq!(
+            task_at(&h, at("2026-09-17T12:00:00Z")),
+            None,
+            "the duplicate hold from the re-claim must not stay open indefinitely"
+        );
+    }
+
+    #[test]
+    fn a_reclaim_still_closes_fully_at_the_status_event_even_with_a_later_session_end() {
+        let events = vec![
+            SessionEvent {
+                ts: at("2026-09-16T12:00:00Z"),
+                kind: SessionEventKind::Claimed {
+                    task: "T-0001".into(),
+                },
+            },
+            SessionEvent {
+                ts: at("2026-09-16T12:05:00Z"),
+                kind: SessionEventKind::Claimed {
+                    task: "T-0001".into(),
+                },
+            },
+            SessionEvent {
+                ts: at("2026-09-16T12:10:00Z"),
+                kind: SessionEventKind::Status {
+                    task: "T-0001".into(),
+                    to: "done".into(),
+                },
+            },
+        ];
+        let h = holds(&events, Some(at("2026-09-16T12:50:00Z")));
+        assert_eq!(task_at(&h, at("2026-09-16T12:09:00Z")), Some("T-0001"));
+        assert_eq!(task_at(&h, at("2026-09-16T12:10:00Z")), None);
+        assert_eq!(
+            task_at(&h, at("2026-09-16T12:30:00Z")),
+            None,
+            "between the close and session_end, the duplicate must not have leaked through to session_end"
+        );
+        assert_eq!(task_at(&h, at("2026-09-17T12:00:00Z")), None);
+    }
+
     // --- orientation -------------------------------------------------------------------------
 
     #[test]
@@ -718,6 +799,18 @@ mod tests {
         assert_eq!(abbreviate(999), "999");
         assert_eq!(abbreviate(1234), "1.2k");
         assert_eq!(abbreviate(2_500_000), "2.5M");
+    }
+
+    #[test]
+    fn abbreviate_promotes_to_m_when_the_rounded_k_value_reaches_1000() {
+        assert_eq!(abbreviate(999_949), "999.9k");
+        assert_eq!(
+            abbreviate(999_950),
+            "1.0M",
+            "999.95k rounds to 1000.0k, which must print as 1.0M instead"
+        );
+        assert_eq!(abbreviate(999_999), "1.0M");
+        assert_eq!(abbreviate(1_000_000), "1.0M");
     }
 
     #[test]
@@ -892,6 +985,54 @@ mod tests {
         let via_ts =
             subagent_task_and_role(None, None, &holds, &[], Some(at("2026-09-16T12:05:00Z")));
         assert_eq!(via_ts, (Some("T-0001".to_string()), "subagent".to_string()));
+    }
+
+    #[test]
+    fn subagent_role_falls_back_to_meta_independently_of_which_step_resolves_the_task() {
+        let holds = vec![Hold {
+            task: "T-0001".into(),
+            start: at("2026-09-16T12:00:00Z"),
+            end: None,
+        }];
+        let meta = Meta {
+            agent_type: Some("ratchet:implementer".into()),
+            description: None,
+            model: None,
+            tool_use_id: None,
+        };
+
+        let event_without_agent_type = SubagentEvent {
+            agent_id: "a1".into(),
+            agent_type: None,
+            description: None,
+            task: Some("T-1".into()),
+        };
+        let via_event_missing_type = subagent_task_and_role(
+            Some(&event_without_agent_type),
+            Some(&meta),
+            &holds,
+            &[],
+            None,
+        );
+        assert_eq!(
+            via_event_missing_type,
+            (Some("T-1".to_string()), "ratchet:implementer".to_string()),
+            "the event resolves the task but has no agent_type, so role falls back to meta"
+        );
+
+        let event_with_agent_type = SubagentEvent {
+            agent_id: "a1".into(),
+            agent_type: Some("ratchet:reviewer".into()),
+            description: None,
+            task: Some("T-1".into()),
+        };
+        let via_event_own_type =
+            subagent_task_and_role(Some(&event_with_agent_type), Some(&meta), &holds, &[], None);
+        assert_eq!(
+            via_event_own_type,
+            (Some("T-1".to_string()), "ratchet:reviewer".to_string()),
+            "the event's own agent_type wins over a differing meta"
+        );
     }
 
     // --- orchestrator_share / cache_efficiency ---------------------------------------------------
