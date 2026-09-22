@@ -18,6 +18,7 @@ pub struct RepoConfig {
     pub repo: RepoSection,
     pub guardrails: GuardrailsSection,
     pub thresholds: Thresholds,
+    pub map: MapSection,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -36,6 +37,16 @@ pub struct GuardrailsSection {
     pub off: Vec<String>,
     /// Path, relative to the main root, of a rules file with the built-in schema.
     pub extra: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct MapSection {
+    /// Directory globs (`*` matches any run of characters, including `/`) left out of the map
+    /// entirely.
+    pub exclude: Vec<String>,
+    /// When non-empty, replaces gate detection entirely — printed verbatim, one per line.
+    pub gate: Vec<String>,
 }
 
 /// Upper bound for a threshold read from `ratchet.toml`, in minutes: 100 years
@@ -241,6 +252,18 @@ mod tests {
         // The clamped value must never make `Duration::minutes(v as i64)` panic.
         let _ = chrono::Duration::minutes(c.thresholds.live_minutes as i64);
         let _ = chrono::Duration::minutes(c.thresholds.idle_minutes as i64);
+    }
+
+    #[test]
+    fn map_section_default_and_parsed() {
+        let c = parse_repo_config("", Path::new("ratchet.toml")).unwrap();
+        assert!(c.map.exclude.is_empty());
+        assert!(c.map.gate.is_empty());
+
+        let text = "[map]\nexclude = [\"vendor/*\"]\ngate = [\"make check\"]\n";
+        let c = parse_repo_config(text, Path::new("ratchet.toml")).unwrap();
+        assert_eq!(c.map.exclude, vec!["vendor/*"]);
+        assert_eq!(c.map.gate, vec!["make check"]);
     }
 
     #[test]

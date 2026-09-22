@@ -7,6 +7,7 @@ mod db;
 mod guardrails;
 mod hooks;
 mod log;
+mod map;
 mod model;
 mod output;
 mod pdf;
@@ -64,6 +65,11 @@ enum Cmd {
     Task {
         #[command(subcommand)]
         cmd: TaskCmd,
+    },
+    /// Repo orientation: a deterministic map of the tree, written to `.ratchet/map.md`.
+    Map {
+        #[command(subcommand)]
+        cmd: Option<MapCmd>,
     },
     /// Extract text from a local PDF via the external `liteparse` CLI.
     Pdf {
@@ -229,6 +235,12 @@ enum TaskCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum MapCmd {
+    /// Print the map's freshness line, or `map: current`.
+    Status,
+}
+
 fn main() {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -355,6 +367,10 @@ fn main() {
             TaskCmd::Unarchive { id, json } => {
                 cli::task_cmd::unarchive(&env, cwd, session.as_deref(), &id, json)
             }
+        },
+        Cmd::Map { cmd } => match cmd {
+            Some(MapCmd::Status) => cli::map_cmd::status(cwd),
+            None => cli::map_cmd::generate(false, &env, cwd),
         },
         Cmd::Pdf { file, pages, ocr } => cli::pdf_cmd::run(&file, pages.as_deref(), ocr, &env),
     };
