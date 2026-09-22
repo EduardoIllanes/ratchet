@@ -2,6 +2,7 @@
 //! turns them into exit 0 + log line.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -15,16 +16,19 @@ use super::handoff_rule;
 use crate::clock;
 use crate::db;
 use crate::guardrails::eval::{evaluate, scratchpad_from_env, GuardContext};
+use crate::guardrails::main_tree;
 use crate::guardrails::rules::load_rule_set;
-use crate::model::{EventKind, LaunchedBy, Session, SessionMode};
-use crate::repo::{find_repo, git_branch, has_venv, normalize, within, Repo};
+use crate::model::{EventKind, LaunchedBy, Session, SessionMode, Source};
+use crate::repo::{find_repo, git_branch, has_venv, normalize, status_paths, within, Repo};
+use crate::services::events;
 use crate::services::sessions::{self, StartInput};
 use crate::services::{tasks, ServiceError};
 
-pub const KNOWN_EVENTS: [&str; 7] = [
+pub const KNOWN_EVENTS: [&str; 8] = [
     "session-start",
     "prompt",
     "pre-tool",
+    "post-tool",
     "stop",
     "subagent-stop",
     "pre-compact",
@@ -67,6 +71,7 @@ pub fn dispatch(
     let cwd = payload.cwd.clone().or(process_cwd).ok_or("no cwd")?;
     match event {
         "pre-tool" => pre_tool(payload, env, &cwd, home),
+        "post-tool" => post_tool(&payload, env, &cwd, home),
         "session-start" => session_start(&payload, env, &cwd, home),
         "prompt" => prompt(&payload, env, &cwd, home),
         // The handoff rule of group 2 goes on top of this heartbeat, and only it may return 2.
@@ -100,8 +105,119 @@ pub fn pre_tool(
             eprintln!("{}", v.render());
             Ok(super::BLOCK)
         }
-        None => Ok(0),
+        None => {
+            // The "before" half of the main-tree post-check: only a command that is actually
+            // going to run is worth a snapshot, and only when there is a session to key it by.
+            if is_command_tool(&payload.tool_name) {
+                if let Some(session_id) = session_identity(&payload, env) {
+                    record_snapshot(home, &session_id, &repo.main_root);
+                }
+            }
+            Ok(0)
+        }
     }
+}
+
+fn is_command_tool(tool_name: &str) -> bool {
+    tool_name == "Bash" || tool_name == "PowerShell"
+}
+
+/// One file per session under `<home>/main-tree-snapshots/`, holding the tracked-file paths
+/// `git status --porcelain --untracked-files=no` showed as changed right before a `Bash`/
+/// `PowerShell` call. A file is the simplest thing that survives across the pre-tool and
+/// post-tool process invocations without a database migration.
+fn snapshot_dir(home: &Path) -> PathBuf {
+    home.join("main-tree-snapshots")
+}
+
+fn snapshot_path(home: &Path, session_id: &str) -> PathBuf {
+    let safe: String = session_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    snapshot_dir(home).join(format!("{safe}.txt"))
+}
+
+/// Best-effort: a write failure here only costs the after-the-fact report, never the hook
+/// itself (the "hooks never break a session" rule).
+fn record_snapshot(home: &Path, session_id: &str, main_root: &Path) {
+    let paths = status_paths(main_root);
+    if fs::create_dir_all(snapshot_dir(home)).is_ok() {
+        let _ = fs::write(snapshot_path(home, session_id), paths.join("\n"));
+    }
+}
+
+/// Reads and removes (consumes) the snapshot recorded for `session_id`. `None` means no
+/// PreToolUse ever recorded one for this session's command, or it was already consumed.
+fn take_snapshot(home: &Path, session_id: &str) -> Option<Vec<String>> {
+    let path = snapshot_path(home, session_id);
+    let text = fs::read_to_string(&path).ok()?;
+    let _ = fs::remove_file(&path);
+    Some(
+        text.lines()
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
+}
+
+/// Main-tree writes detected after the fact: never blocks, stays silent unless a tracked file
+/// of the main tree changed during the command.
+fn post_tool(
+    payload: &Payload,
+    env: &HashMap<String, String>,
+    cwd: &Path,
+    home: &Path,
+) -> Result<i32, String> {
+    if !is_command_tool(&payload.tool_name) {
+        return Ok(0);
+    }
+    let Some(repo) = find_repo(cwd).map_err(|e| e.to_string())? else {
+        return Ok(0);
+    };
+    let Some(session_id) = session_identity(payload, env) else {
+        return Ok(0);
+    };
+    let Some(before) = take_snapshot(home, &session_id) else {
+        return Ok(0);
+    };
+    let after = status_paths(&repo.main_root); // the hook's one `git status`
+    let changed = main_tree::newly_changed(&before, &after);
+    if changed.is_empty() {
+        return Ok(0);
+    }
+    let set = load_rule_set(home, Some(&repo)).map_err(|e| e.to_string())?;
+    // A repo may disable `main-tree` (or replace it); honour that the same way the pre-tool
+    // check does rather than reporting against a rule the repo turned off.
+    let Some(rule) = set.active().find(|r| r.id == "main-tree") else {
+        return Ok(0);
+    };
+    let now = clock::now(env);
+    let conn = db::open_ready(home).map_err(|e| e.to_string())?;
+    let command = payload
+        .tool_input
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let ev_payload = serde_json::json!({ "command": command, "files": changed });
+    events::emit(
+        &conn,
+        EventKind::GuardrailMainTreeWrite,
+        &ev_payload,
+        Source::Hook,
+        Some(session_id.as_str()),
+        None,
+        now,
+    )
+    .map_err(|e| e.to_string())?;
+    eprintln!("{}", main_tree::render_post_check(rule, &changed));
+    Ok(0)
 }
 
 /// The identity the harness fixed: the payload first, then the environment (a headless run sets
@@ -374,6 +490,7 @@ mod tests {
             "session-start",
             "prompt",
             "pre-tool",
+            "post-tool",
             "stop",
             "subagent-stop",
             "pre-compact",
