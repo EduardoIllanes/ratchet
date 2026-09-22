@@ -912,7 +912,10 @@ impl TranscriptBuilder {
     }
 
     fn slug(cwd: &Path) -> String {
-        cwd.to_string_lossy().replace(['/', '\\'], "-")
+        cwd.to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
     }
 
     fn transcript_path(&self, cwd: &Path, session_id: &str) -> PathBuf {
