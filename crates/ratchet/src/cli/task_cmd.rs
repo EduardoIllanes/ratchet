@@ -17,6 +17,7 @@ use crate::repo::{find_repo, normalize};
 use crate::services::{events, sessions, tasks};
 
 const VALID_STATUSES: &str = "backlog, ready, in_progress, blocked, review, done";
+const VALID_VERDICTS: &str = "approve, changes";
 
 /// What every subcommand needs, opened once: the database, the repo of this directory when there
 /// is one, its thresholds, and the instant this command runs at.
@@ -87,6 +88,15 @@ fn parse_status(text: &str) -> Result<TaskStatus, String> {
         Ok(status)
     } else {
         Err(format!("unknown status `{text}`; valid: {VALID_STATUSES}"))
+    }
+}
+
+/// Only two words are ever stored, so this stays a plain match rather than another `db_enum!`.
+fn parse_verdict(text: &str) -> Result<&'static str, String> {
+    match text {
+        "approve" => Ok("approve"),
+        "changes" => Ok("changes"),
+        _ => Err(format!("unknown verdict `{text}`; valid: {VALID_VERDICTS}")),
     }
 }
 
@@ -262,7 +272,24 @@ pub fn show(env: &HashMap<String, String>, cwd: Option<PathBuf>, id: &str, json_
 }
 
 /// One short line for an event payload: its text when it has one, else its non-null keys.
+/// A `review.verdict` payload carries both `verdict` and `text`; the verdict word leads the line
+/// so `approve` and `changes` are told apart at a glance, not swallowed by the generic `text` case
+/// below.
 fn summary(payload: &Value) -> String {
+    if let Some(verdict) = payload.get("verdict").and_then(|v| v.as_str()) {
+        let text = payload
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        return if text.is_empty() {
+            verdict.to_string()
+        } else {
+            format!("{verdict}: {text}")
+        };
+    }
     if let Some(text) = payload.get("text").and_then(|v| v.as_str()) {
         return text.split_whitespace().collect::<Vec<_>>().join(" ");
     }
@@ -370,6 +397,7 @@ pub fn claim(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn status(
     env: &HashMap<String, String>,
     cwd: Option<PathBuf>,
@@ -377,6 +405,7 @@ pub fn status(
     id: &str,
     to: &str,
     why: Option<&str>,
+    unreviewed: bool,
     json_out: bool,
 ) -> i32 {
     let mut f = match face(env, cwd) {
@@ -395,6 +424,7 @@ pub fn status(
         Source::Cli,
         session_id.as_deref(),
         why,
+        unreviewed,
         f.now,
     ) {
         Err(e) => fail(e),
@@ -459,6 +489,47 @@ pub fn check(
                     item.position,
                     item.text
                 );
+            }
+            0
+        }
+    }
+}
+
+/// Records an independent review verdict. Never touches status: `done` is what reads this back.
+#[allow(clippy::too_many_arguments)]
+pub fn review(
+    env: &HashMap<String, String>,
+    cwd: Option<PathBuf>,
+    session: Option<&str>,
+    id: &str,
+    verdict: &str,
+    text: &str,
+    json_out: bool,
+) -> i32 {
+    let mut f = match face(env, cwd) {
+        Ok(v) => v,
+        Err(e) => return fail(e),
+    };
+    let verdict = match parse_verdict(verdict) {
+        Ok(v) => v,
+        Err(e) => return fail(e),
+    };
+    let session_id = attributed(&f, session);
+    match tasks::review(
+        &mut f.conn,
+        id,
+        verdict,
+        text,
+        Source::Cli,
+        session_id.as_deref(),
+        f.now,
+    ) {
+        Err(e) => fail(e),
+        Ok(ev) => {
+            if json_out {
+                output::emit_json(&f.home, "task-review", &json!(ev), f.now);
+            } else {
+                println!("{id} review recorded: {verdict}");
             }
             0
         }

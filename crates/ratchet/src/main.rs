@@ -61,7 +61,7 @@ enum Cmd {
         cmd: SessionCmd,
     },
     /// The task board: `list`, `show`, `new`, `claim`, `status`, `check`, `note`, `handoff`,
-    /// `archive`, `unarchive`.
+    /// `review`, `archive`, `unarchive`.
     Task {
         #[command(subcommand)]
         cmd: TaskCmd,
@@ -205,6 +205,19 @@ enum TaskCmd {
         /// Reason; required to close a task that has no checklist.
         #[arg(long)]
         why: Option<String>,
+        /// Owner-only escape hatch: closes a task as `done` without an independent review
+        /// verdict, and records a note saying so. The checklist requirement still applies.
+        #[arg(long)]
+        unreviewed: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record an independent review verdict (`approve` or `changes`) with free text. Never
+    /// changes status; `status <id> done` is what reads it back.
+    Review {
+        id: String,
+        verdict: String,
+        text: String,
         #[arg(long)]
         json: bool,
     },
@@ -352,15 +365,28 @@ fn main() {
             TaskCmd::Claim { id, json } => {
                 cli::task_cmd::claim(&env, cwd, session.as_deref(), &id, json)
             }
-            TaskCmd::Status { id, to, why, json } => cli::task_cmd::status(
+            TaskCmd::Status {
+                id,
+                to,
+                why,
+                unreviewed,
+                json,
+            } => cli::task_cmd::status(
                 &env,
                 cwd,
                 session.as_deref(),
                 &id,
                 &to,
                 why.as_deref(),
+                unreviewed,
                 json,
             ),
+            TaskCmd::Review {
+                id,
+                verdict,
+                text,
+                json,
+            } => cli::task_cmd::review(&env, cwd, session.as_deref(), &id, &verdict, &text, json),
             TaskCmd::Check {
                 id,
                 position,
