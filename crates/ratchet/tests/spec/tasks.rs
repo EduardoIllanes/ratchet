@@ -512,6 +512,33 @@ fn tasks__verdict_recorded() {
     assert_eq!(task_state(&sb, &id).0, "backlog");
 }
 
+#[test]
+fn tasks__an_unregistered_verdict_is_still_recorded_and_listed() {
+    let sb = board("s-30");
+    let id = new_task(&sb, "ghost reviewed", &[], "s-30", 1);
+    // s-ghost-reviewer is never registered (no join()) -- recording is unconditional on
+    // registration, only the done gate cares.
+    let out = task(
+        &sb,
+        &[
+            "review",
+            &id,
+            "approve",
+            "looks fine to a stranger",
+            "--session",
+            "s-ghost-reviewer",
+        ],
+        "s-30",
+        2,
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let payloads = payloads_of(&sb, &id, "review.verdict");
+    assert_eq!(payloads.len(), 1);
+    assert!(payloads[0].contains("approve"), "{payloads:?}");
+    let shown = stdout(&task(&sb, &["show", &id], "s-30", 3));
+    assert!(shown.contains("looks fine to a stranger"), "{shown}");
+}
+
 // --- Requirement: Done requires an independent review ---------------------------------------
 
 #[test]
@@ -557,8 +584,11 @@ fn tasks__done_refused_when_the_approve_came_from_the_holding_session() {
 #[test]
 fn tasks__done_refused_when_the_approve_came_from_a_session_that_checked_off_an_item() {
     let sb = board("s-29");
-    let id = new_task(&sb, "history disqualifies", &["only criterion"], "s-29", 1);
-    assert_eq!(code(&task(&sb, &["claim", &id], "s-29", 2)), 0);
+    // s-prior is registered (join()) so this pins the "worked on it" refusal specifically, not
+    // the separate "not registered" refusal added for T-0016.
+    assert_eq!(code(&join(&sb, "s-prior", 1)), 0);
+    let id = new_task(&sb, "history disqualifies", &["only criterion"], "s-29", 2);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-29", 3)), 0);
     // s-prior never holds the task, but it recorded the checklist.done earlier (e.g. before a
     // transfer) — close enough to the work to disqualify it as an independent reviewer.
     assert_eq!(
@@ -566,7 +596,7 @@ fn tasks__done_refused_when_the_approve_came_from_a_session_that_checked_off_an_
             &sb,
             &["check", &id, "1", "--session", "s-prior"],
             "s-29",
-            3
+            4
         )),
         0
     );
@@ -575,11 +605,11 @@ fn tasks__done_refused_when_the_approve_came_from_a_session_that_checked_off_an_
             &sb,
             &["review", &id, "approve", "fine", "--session", "s-prior"],
             "s-29",
-            4
+            5
         )),
         0
     );
-    let out = task(&sb, &["status", &id, "done"], "s-29", 5);
+    let out = task(&sb, &["status", &id, "done"], "s-29", 6);
     assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
     let err = stderr(&out);
     assert!(err.contains("no independent review"), "{err}");
@@ -591,11 +621,48 @@ fn tasks__done_refused_when_the_approve_came_from_a_session_that_checked_off_an_
 }
 
 #[test]
+fn tasks__done_refused_when_the_approve_came_from_an_unregistered_session() {
+    let sb = board("s-31");
+    let id = new_task(&sb, "ghost approved", &["only criterion"], "s-31", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-31", 2)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-31", 3)), 0);
+    // s-ghost is never registered (no join()) — a hand-typed --session can still record a
+    // verdict, but it must not satisfy the done gate (T-0016: no minting an arbitrary session
+    // to self-approve).
+    assert_eq!(
+        code(&task(
+            &sb,
+            &[
+                "review",
+                &id,
+                "approve",
+                "looks fine",
+                "--session",
+                "s-ghost"
+            ],
+            "s-31",
+            4
+        )),
+        0
+    );
+    let out = task(&sb, &["status", &id, "done"], "s-31", 5);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.to_lowercase().contains("not registered"), "{err}");
+    assert!(err.to_lowercase().contains("claude code"), "{err}");
+    assert!(err.contains("--unreviewed"), "{err}");
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
+}
+
+#[test]
 fn tasks__done_allowed_after_an_approve_from_another_session() {
     let sb = board("s-25");
-    let id = new_task(&sb, "properly reviewed", &["only criterion"], "s-25", 1);
-    assert_eq!(code(&task(&sb, &["claim", &id], "s-25", 2)), 0);
-    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-25", 3)), 0);
+    // The reviewer session must be one ratchet itself registered (T-0016) — a hand-typed
+    // --session that was never seen by the session-start hook does not satisfy the gate.
+    assert_eq!(code(&join(&sb, "s-reviewer", 1)), 0);
+    let id = new_task(&sb, "properly reviewed", &["only criterion"], "s-25", 2);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-25", 3)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-25", 4)), 0);
     assert_eq!(
         code(&task(
             &sb,
@@ -608,11 +675,11 @@ fn tasks__done_allowed_after_an_approve_from_another_session() {
                 "s-reviewer"
             ],
             "s-25",
-            4
+            5
         )),
         0
     );
-    let out = task(&sb, &["status", &id, "done"], "s-25", 5);
+    let out = task(&sb, &["status", &id, "done"], "s-25", 6);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     assert_eq!(task_state(&sb, &id).0, "done");
 }

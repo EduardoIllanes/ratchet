@@ -178,24 +178,35 @@ An independent review of a task SHALL be recorded as a verdict — `approve` or 
 free text, appended as a `review.verdict` event attributed to the recording session. Recording a
 verdict SHALL NOT change the task's status. The recording session need not be registered (unlike
 claiming a task): a reviewer profile records its own, unregistered session identifier. An unknown
-task or an unknown verdict word SHALL be refused, listing the two valid words.
+task or an unknown verdict word SHALL be refused, listing the two valid words. Recording is
+unconditional on registration: an unregistered session's verdict is appended and shown exactly
+like any other, even though it will not by itself satisfy the done gate below.
 
 #### Scenario: Verdict recorded
 - **WHEN** a review verdict of `approve` with text `"looks right"` is recorded against a task
 - **THEN** one `review.verdict` event is appended carrying that verdict and that text, and the
   task's status is unchanged
 
+#### Scenario: An unregistered verdict is still recorded and listed
+- **WHEN** a review verdict is recorded by a session identifier the registry does not know
+- **THEN** the `review.verdict` event is appended and appears in `ratchet task show` and the
+  task's history like any other
+
 ### Requirement: Done requires an independent review
 Moving a task to `done` SHALL be refused unless its most recent `review.verdict` event is
-`approve`, recorded by a session that is neither the task's current holder nor any session that
-recorded a `task.claimed` or a `checklist.done` event on it. The refusal SHALL name the exact
+`approve`, recorded by a session that ratchet itself registered — one recorded by the
+session-start hook — and that is neither the task's current holder nor any session that recorded
+a `task.claimed` or a `checklist.done` event on it. The refusal SHALL name the exact
 `ratchet task review` command that supplies a valid verdict, and the session to record it from
 other than: the disqualified verdict's own session when there is one to point at (whether it was
 disqualified for holding the task or for a claimed/checklist.done entry in the task's history
-that is not the current holder), and the current holder when there is no verdict at all.
-`ratchet task status <id> done --unreviewed` SHALL bypass this requirement — the checklist
-requirement of "States and transitions" still applies — and SHALL record a note reading "done
-without independent review", so the bypass stays visible on the board.
+that is not the current holder), and the current holder when there is no verdict at all. When the
+most recent `approve` instead came from a session the registry does not know, the refusal SHALL
+say that the reviewer's session is not one ratchet registered, that the review must be recorded
+from a Claude Code session opened in this repo, and that `--unreviewed` remains available to the
+task's owner. `ratchet task status <id> done --unreviewed` SHALL bypass this requirement — the
+checklist requirement of "States and transitions" still applies — and SHALL record a note reading
+"done without independent review", so the bypass stays visible on the board.
 
 #### Scenario: Done refused with no verdict
 - **WHEN** a task with a complete checklist and no `review.verdict` event is moved to `done`
@@ -209,15 +220,23 @@ without independent review", so the bypass stays visible on the board.
   holding session
 
 #### Scenario: Done refused when the approve came from a session that checked off an item
-- **WHEN** a task's most recent `review.verdict` event is `approve`, recorded by a session that
-  never held the task but earlier recorded a `checklist.done` event on it, and the task is moved
-  to `done`
+- **WHEN** a task's most recent `review.verdict` event is `approve`, recorded by a session
+  ratchet registered that never held the task but earlier recorded a `checklist.done` event on
+  it, and the task is moved to `done`
 - **THEN** the operation is refused, naming that session — not the task's current holder, who
   never reviewed anything
 
+#### Scenario: Done refused when the approve came from an unregistered session
+- **WHEN** a task's most recent `review.verdict` event is `approve`, recorded by a session
+  identifier the registry does not know, and the task is moved to `done`
+- **THEN** the operation is refused, saying that session is not one ratchet registered, that the
+  review must be recorded from a Claude Code session opened in this repo, and naming
+  `--unreviewed` as the owner's option
+
 #### Scenario: Done allowed after an approve from another session
 - **WHEN** a task's checklist is complete and its most recent `review.verdict` event is `approve`,
-  recorded by a session that never claimed the task and never checked off one of its items
+  recorded by a session ratchet registered that never claimed the task and never checked off one
+  of its items
 - **THEN** the task moves to `done`
 
 #### Scenario: Done refused when a changes verdict is newer than the approve

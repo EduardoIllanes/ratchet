@@ -59,12 +59,17 @@ self-reviewed, placeholder-shipping, branch-left-red change (T-0006, 2026-09-22)
       **target branch, after merging your work into it** — not only inside your worktree. A
       worktree can be green while the branch it merges into is red.
 - [ ] **The review is never your own note.** `ratchet task note` from the session that did the
-      work is not a review. An independent reviewer — a different session, its own
-      `--session` — records the verdict: `ratchet task review <id> approve "…"` or
-      `ratchet task review <id> changes "…"`.
-- [ ] **Before `status <id> done`**: an `approve` verdict from that independent session must
-      already exist. The CLI refuses `done` on its own when it is missing, naming what to run —
-      the check here is so you never find that out from a refusal mid-close.
+      work is not a review. An independent reviewer — a different session that ratchet itself
+      registered, not a hand-typed `--session` — records the verdict: `ratchet task review <id>
+      approve "…"` or `ratchet task review <id> changes "…"`. A verdict from a session ratchet
+      never registered is still recorded, but it will not satisfy the done gate below: it must
+      come from a Claude Code session actually opened in this repo (the session-start hook
+      registers it), not a string invented on the command line — otherwise a session could mint
+      an arbitrary `--session` and approve its own work.
+- [ ] **Before `status <id> done`**: an `approve` verdict from that independent, registered
+      session must already exist. The CLI refuses `done` on its own when it is missing or when
+      the verdict's session was never registered, naming what to run — the check here is so you
+      never find that out from a refusal mid-close.
 - [ ] **Nothing named `scratch`, `probe`, or `placeholder` is committed.** A probe lives in the
       job's temp directory or the session scratchpad, never in the repo, never in a commit.
 - [ ] **End**: `ratchet task handoff <id> "…" --status review` — what is left, where the work is,
