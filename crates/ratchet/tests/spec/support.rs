@@ -1139,3 +1139,24 @@ pub fn seed_subagent_event(
     )
     .unwrap();
 }
+
+/// True if `text` contains `n` as a standalone number: the byte immediately before and after
+/// every match is not an ASCII digit, `.` or `,` — so `contains_number(text, "40")` cannot be
+/// satisfied by "140", "40.5", "1,400" or "2400". Every scenario that checks a specific total
+/// uses this instead of `str::contains`, so an aggregate that is merely a superstring of the
+/// right digits does not pass (fix round 1, finding 1/4).
+pub fn contains_number(text: &str, n: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut start = 0usize;
+    while let Some(rel) = text[start..].find(n) {
+        let idx = start + rel;
+        let before_ok = idx == 0 || !matches!(bytes[idx - 1], b'0'..=b'9' | b'.' | b',');
+        let end = idx + n.len();
+        let after_ok = end >= bytes.len() || !matches!(bytes[end], b'0'..=b'9' | b'.' | b',');
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
+}

@@ -1,6 +1,9 @@
 //! One test per `#### Scenario` of openspec/specs/usage/spec.md, named by slug. `RATCHET_HOME`
 //! isolates the database (as every other spec test file does); `RATCHET_CLAUDE_PROJECTS` (set by
-//! `support::usage`) isolates the transcript tree in the same way.
+//! `support::usage`) isolates the transcript tree in the same way. `support::contains_number`
+//! anchors every bare-digit assertion to a standalone number (fix round 1): plain `str::contains`
+//! would let e.g. `"40"` match inside `"140"`, which is exactly the shape a hold-boundary leak or
+//! a double-counted aggregate would produce.
 //!
 //! NOTE (Task 1 tension, flagged for the owner): the plan's brief names a token-tuple builder
 //! and the `ratchet usage` process runner both `usage` in `support.rs`, which cannot coexist in
@@ -71,7 +74,10 @@ fn usage__missing_projects_directory_fails_naming_the_path() {
         &sb,
         &["usage"],
         &sb.root(),
-        &[("RATCHET_CLAUDE_PROJECTS", &missing.to_string_lossy())],
+        &[
+            ("RATCHET_CLAUDE_PROJECTS", &missing.to_string_lossy()),
+            ("RATCHET_NOW", &at(2)),
+        ],
     );
     assert_eq!(code(&out), 1, "{}", stdout(&out));
     assert!(
@@ -112,7 +118,7 @@ fn usage__garbage_lines_and_a_record_without_usage_are_counted() {
     assert!(text.contains("skipped 1"), "{text}");
     assert!(text.contains("partial 1"), "{text}");
     assert!(text.contains("1.2.3"), "{text}"); // the highest version seen
-    assert!(text.contains("300"), "{text}"); // 100 + 200, the two understood calls
+    assert!(contains_number(&text, "300"), "{text}"); // 100 + 200, the two understood calls
 }
 
 #[test]
@@ -135,26 +141,28 @@ fn usage__one_task_one_session_orchestrator_only() {
     let id = new_task(&sb, "one task", &[], "s-6", 1);
     assert_eq!(code(&task(&sb, &["claim", &id], "s-6", 2)), 0);
     let tb = TranscriptBuilder::new();
+    // Nonzero cache_write/cache_read on every call (fix round 1, finding 2): a formula that
+    // ignores those two token classes must fail the assertions below.
     tb.call(
         &sb.root(),
         "s-6",
         &at(3),
         "claude-sonnet-5",
-        &tokens(100, 0, 0, 50),
+        &tokens(100, 7, 11, 50),
     )
     .call(
         &sb.root(),
         "s-6",
         &at(4),
         "claude-sonnet-5",
-        &tokens(100, 0, 0, 50),
+        &tokens(100, 7, 11, 50),
     )
     .call(
         &sb.root(),
         "s-6",
         &at(5),
         "claude-sonnet-5",
-        &tokens(100, 0, 0, 50),
+        &tokens(100, 7, 11, 50),
     );
     assert_eq!(code(&task(&sb, &["status", &id, "review"], "s-6", 6)), 0);
 
@@ -162,7 +170,9 @@ fn usage__one_task_one_session_orchestrator_only() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("orchestrator"), "{text}");
-    assert!(text.contains("300"), "{text}"); // 3 x 100 input, summed
+    assert!(contains_number(&text, "300"), "{text}"); // 3 x 100 input, summed
+    assert!(contains_number(&text, "21"), "{text}"); // 3 x 7 cache write, summed
+    assert!(contains_number(&text, "33"), "{text}"); // 3 x 11 cache read, summed
     assert_eq!(
         text.matches("orchestrator").count(),
         1,
@@ -177,19 +187,21 @@ fn usage__two_tasks_held_in_sequence_split_the_session() {
     let t2 = new_task(&sb, "second", &[], "s-7", 2);
     assert_eq!(code(&task(&sb, &["claim", &t1], "s-7", 3)), 0);
     let tb = TranscriptBuilder::new();
+    // Nonzero, distinct cache_write/cache_read per task (fix round 1, finding 2) so the split is
+    // provable for those token classes too, not just input.
     tb.call(
         &sb.root(),
         "s-7",
         &at(4),
         "claude-sonnet-5",
-        &tokens(100, 0, 0, 10),
+        &tokens(100, 13, 17, 10),
     )
     .call(
         &sb.root(),
         "s-7",
         &at(5),
         "claude-sonnet-5",
-        &tokens(100, 0, 0, 10),
+        &tokens(100, 13, 17, 10),
     );
     assert_eq!(
         code(&task(
@@ -206,18 +218,26 @@ fn usage__two_tasks_held_in_sequence_split_the_session() {
         "s-7",
         &at(8),
         "claude-sonnet-5",
-        &tokens(50, 0, 0, 5),
+        &tokens(50, 9, 21, 5),
     );
 
     let d1 = usage(&sb, &tb, &[&t1], &sb.root(), &[("RATCHET_NOW", &at(9))]);
     assert_eq!(code(&d1), 0, "{}", stderr(&d1));
-    assert!(stdout(&d1).contains("200"), "{}", stdout(&d1)); // 100 + 100
-    assert!(!stdout(&d1).contains("250"), "{}", stdout(&d1)); // never the sum of both tasks
+    let text1 = stdout(&d1);
+    assert!(contains_number(&text1, "200"), "{text1}"); // 100 + 100
+    assert!(contains_number(&text1, "26"), "{text1}"); // cache write: 13 + 13
+    assert!(contains_number(&text1, "34"), "{text1}"); // cache read: 17 + 17
+    assert!(!contains_number(&text1, "250"), "{text1}"); // never the sum of both tasks' input
+    assert!(!contains_number(&text1, "35"), "{text1}"); // never both tasks' cache write (26+9)
+    assert!(!contains_number(&text1, "55"), "{text1}"); // never both tasks' cache read (34+21)
 
     let d2 = usage(&sb, &tb, &[&t2], &sb.root(), &[("RATCHET_NOW", &at(9))]);
     assert_eq!(code(&d2), 0, "{}", stderr(&d2));
-    assert!(stdout(&d2).contains("50"), "{}", stdout(&d2));
-    assert!(!stdout(&d2).contains("150"), "{}", stdout(&d2));
+    let text2 = stdout(&d2);
+    assert!(contains_number(&text2, "50"), "{text2}");
+    assert!(contains_number(&text2, "9"), "{text2}"); // cache write
+    assert!(contains_number(&text2, "21"), "{text2}"); // cache read
+    assert!(!contains_number(&text2, "150"), "{text2}"); // never leaks the last t1 call in too
 }
 
 #[test]
@@ -274,7 +294,13 @@ fn usage__calls_outside_any_held_task_are_unassigned() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("unassigned"), "{text}");
-    assert!(text.contains("40"), "{text}"); // 10 + 10 + 20, outside the hold
+    // `--by session --json`'s shape isn't fixed by any scenario (Requirement 9 only specs a
+    // single-task query), so this stays text-based, anchored two ways (fix round 1, finding 1):
+    // against a substring collision ("40" inside "140"), and against the specific wrong sum a
+    // hold-boundary leak would produce (10 + 10 + 100 + 20 = 140, the held call leaking into
+    // "unassigned" too).
+    assert!(contains_number(&text, "40"), "{text}"); // 10 + 10 + 20, outside the hold
+    assert!(!contains_number(&text, "140"), "{text}");
 }
 
 // --- Requirement: Subagent calls are attributed through ratchet's own events first ----------
@@ -312,29 +338,45 @@ fn usage__a_subagent_is_attributed_through_its_start_event() {
         "{}",
         stdout(&out)
     );
-    assert!(stdout(&out).contains("500"), "{}", stdout(&out));
+    assert!(contains_number(&stdout(&out), "500"), "{}", stdout(&out));
 }
 
 #[test]
 fn usage__a_subagent_is_attributed_through_tooluseid_when_no_event_exists() {
+    // Reworked (fix round 1, finding 3): the original version had the toolUseId match and the
+    // first-timestamp fallback resolve to the same task, so an implementation missing the
+    // toolUseId lookup entirely still passed. Now two tasks are held in sequence: the dispatching
+    // `Agent` tool_use is issued while T-A is held, but the subagent's own first record timestamp
+    // falls while T-B is held instead -- only a real toolUseId lookup lands it on T-A.
     let sb = board("s-10");
-    let id = new_task(&sb, "subagent via tool use id", &[], "s-10", 1);
-    assert_eq!(code(&task(&sb, &["claim", &id], "s-10", 2)), 0);
+    let t1 = new_task(&sb, "task a", &[], "s-10", 1);
+    let t2 = new_task(&sb, "task b", &[], "s-10", 2);
+    assert_eq!(code(&task(&sb, &["claim", &t1], "s-10", 3)), 0);
     let tb = TranscriptBuilder::new();
     tb.call_with_tool(
         &sb.root(),
         "s-10",
-        &at(3),
+        &at(4),
         "claude-sonnet-5",
         &tokens(20, 0, 0, 5),
         "Agent",
         "tu-9",
-    )
-    .subagent(
+    );
+    assert_eq!(
+        code(&task(
+            &sb,
+            &["status", &t1, "done", "--why", "closing"],
+            "s-10",
+            5
+        )),
+        0
+    );
+    assert_eq!(code(&task(&sb, &["claim", &t2], "s-10", 6)), 0);
+    tb.subagent(
         &sb.root(),
         "s-10",
         "a2",
-        &at(3),
+        &at(7),
         "claude-sonnet-5",
         &tokens(300, 0, 0, 40),
     );
@@ -349,14 +391,15 @@ fn usage__a_subagent_is_attributed_through_tooluseid_when_no_event_exists() {
     );
     // No subagent.start/stop event for "a2" at all.
 
-    let out = usage(&sb, &tb, &[&id], &sb.root(), &[("RATCHET_NOW", &at(4))]);
-    assert_eq!(code(&out), 0, "{}", stderr(&out));
-    assert!(
-        stdout(&out).contains("ratchet:implementer"),
-        "{}",
-        stdout(&out)
-    );
-    assert!(stdout(&out).contains("300"), "{}", stdout(&out));
+    let a = usage(&sb, &tb, &[&t1], &sb.root(), &[("RATCHET_NOW", &at(8))]);
+    assert_eq!(code(&a), 0, "{}", stderr(&a));
+    let text_a = stdout(&a);
+    assert!(text_a.contains("ratchet:implementer"), "{text_a}");
+    assert!(contains_number(&text_a, "300"), "{text_a}");
+
+    let b = usage(&sb, &tb, &[&t2], &sb.root(), &[("RATCHET_NOW", &at(8))]);
+    assert_eq!(code(&b), 0, "{}", stderr(&b));
+    assert!(!contains_number(&stdout(&b), "300"), "{}", stdout(&b));
 }
 
 #[test]
@@ -379,7 +422,7 @@ fn usage__a_subagent_is_attributed_by_first_timestamp_when_both_are_missing() {
     let out = usage(&sb, &tb, &[&id], &sb.root(), &[("RATCHET_NOW", &at(4))]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     assert!(stdout(&out).contains("subagent"), "{}", stdout(&out));
-    assert!(stdout(&out).contains("70"), "{}", stdout(&out));
+    assert!(contains_number(&stdout(&out), "70"), "{}", stdout(&out));
 }
 
 #[test]
@@ -414,15 +457,18 @@ fn usage__a_general_purpose_subagent_shows_its_description() {
     // see Assumption 5 at the top of this plan for why the spec's own prose example is not
     // reproduced verbatim here.
     let clipped: String = description.chars().take(40).collect();
+    let text = stdout(&out);
     assert!(
-        stdout(&out).contains(&format!("general-purpose: {clipped}")),
-        "{}",
-        stdout(&out)
+        text.contains(&format!("general-purpose: {clipped}")),
+        "{text}"
     );
+    assert!(!text.contains("caller of the old helper"), "{text}");
+    // A clip one character too long must not pass either (fix round 1, finding 7): the 41st
+    // character tagging along right after the correct 40-character prefix.
+    let too_long: String = description.chars().take(41).collect();
     assert!(
-        !stdout(&out).contains("caller of the old helper"),
-        "{}",
-        stdout(&out)
+        !text.contains(&format!("general-purpose: {too_long}")),
+        "{text}"
     );
 }
 
@@ -474,7 +520,7 @@ fn usage__calls_before_the_first_claim_are_orientation() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("orientation"), "{text}");
-    assert!(text.contains("60"), "{text}"); // 30 + 30, the two calls before the claim
+    assert!(contains_number(&text, "60"), "{text}"); // 30 + 30, the two calls before the claim
 }
 
 #[test]
@@ -518,7 +564,7 @@ fn usage__a_dispatch_ends_orientation_without_a_claim() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("orientation"), "{text}");
-    assert!(text.contains("50"), "{text}"); // 25 + 25 -- the dispatching call itself is included
+    assert!(contains_number(&text, "50"), "{text}"); // 25 + 25 -- the dispatching call itself is included
 }
 
 #[test]
@@ -554,7 +600,7 @@ fn usage__a_fix_round_after_a_review_verdict_still_belongs_to_the_task() {
     let out = usage(&sb, &tb, &[&id], &sb.root(), &[("RATCHET_NOW", &at(7))]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let text = stdout(&out);
-    assert!(text.contains("70"), "{text}"); // 10 + 30 + 30, all on the task
+    assert!(contains_number(&text, "70"), "{text}"); // 10 + 30 + 30, all on the task
     assert!(!text.contains("unassigned"), "{text}");
 }
 
@@ -601,7 +647,7 @@ fn usage__two_review_rounds_and_tokens_per_round() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("rounds 2"), "{text}");
-    assert!(text.contains("140"), "{text}"); // 70 + 70, round 2's tokens
+    assert!(contains_number(&text, "140"), "{text}"); // 70 + 70, round 2's tokens
 }
 
 // --- Requirement: Weights add a cost column, and only then ----------------------------------
@@ -617,19 +663,25 @@ fn usage__weights_present_add_cost() {
     )
     .unwrap();
     let tb = TranscriptBuilder::new();
+    // Nonzero on all four classes (fix round 1, finding 2): the cache_write ($3.75/M) and
+    // cache_read ($0.30/M) weights must contribute, or the assertions below fail.
     tb.call(
         &sb.root(),
         "s-16",
         &at(3),
         "claude-sonnet-5",
-        &tokens(1_000_000, 0, 0, 1_000_000),
+        &tokens(1_000_000, 1_000_000, 1_000_000, 1_000_000),
     );
 
     let out = usage(&sb, &tb, &[&id], &sb.root(), &[("RATCHET_NOW", &at(4))]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
-    // 1M input @ $3/M + 1M output @ $15/M = $18.00
-    assert!(stdout(&out).contains("cost"), "{}", stdout(&out));
-    assert!(stdout(&out).contains("18"), "{}", stdout(&out));
+    let text = stdout(&out);
+    // 1M each of input/cache_write/cache_read/output @ $3.00 + $3.75 + $0.30 + $15.00 per M =
+    // $22.05 -- exercises every weight coefficient, not just input/output.
+    assert!(text.contains("cost"), "{text}");
+    assert!(text.contains("22.05"), "{text}");
+    assert!(!text.contains("18.00"), "{text}"); // input+output only, ignoring both cache classes
+    assert!(!text.contains("22050000"), "{text}"); // forgot to divide by 1,000,000
 }
 
 #[test]
@@ -677,8 +729,13 @@ fn usage__the_longest_matching_prefix_wins() {
 
     let out = usage(&sb, &tb, &[&id], &sb.root(), &[("RATCHET_NOW", &at(4))]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
-    // "claude" ($1/M) would give $1.00; "claude-opus" ($100/M) gives $100.00.
-    assert!(stdout(&out).contains("100"), "{}", stdout(&out));
+    let text = stdout(&out);
+    // "claude" ($1/M) would give $1.00; "claude-opus" ($100/M) gives $100.00. Anchored to the
+    // formatted decimal (fix round 1, finding 4): a bare `contains("100")` also passes for
+    // $100,000,000.00 (forgot to divide by a million).
+    assert!(text.contains("100.00"), "{text}");
+    assert!(!text.contains("1.00"), "{text}"); // the shorter "claude" prefix must not have won
+    assert!(!text.contains("100000000"), "{text}"); // forgot to divide by 1,000,000
 }
 
 // --- Requirement: Reports come in four shapes and a time window -----------------------------
@@ -813,9 +870,9 @@ fn usage__by_role_aggregates_across_tasks() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("orchestrator"), "{text}");
-    assert!(text.contains("120"), "{text}"); // 50 + 70
+    assert!(contains_number(&text, "120"), "{text}"); // 50 + 70
     assert!(text.contains("ratchet:reviewer"), "{text}");
-    assert!(text.contains("140"), "{text}"); // 60 + 80
+    assert!(contains_number(&text, "140"), "{text}"); // 60 + 80
     assert!(text.contains("review rounds per task"), "{text}");
     assert!(text.contains("orientation per session"), "{text}");
 }
@@ -849,12 +906,22 @@ fn usage__json_shape() {
     let id = new_task(&sb, "json", &[], "s-23", 1);
     assert_eq!(code(&task(&sb, &["claim", &id], "s-23", 2)), 0);
     let tb = TranscriptBuilder::new();
+    // A full `Usage` literal, not `tokens(...)` (fix round 1, finding 2/5): `thinking` needs a
+    // `Some(_)` value so `output_tokens_details.thinking_tokens` parsing is exercised, and
+    // `tokens(...)` always hardcodes `thinking: None`. Every field is distinct so each JSON key
+    // assertion below can only be satisfied by its own value.
     tb.call(
         &sb.root(),
         "s-23",
         &at(3),
         "claude-sonnet-5",
-        &tokens(10, 0, 0, 1),
+        &Usage {
+            input: 10,
+            cache_write: 4,
+            cache_read: 6,
+            output: 1,
+            thinking: Some(3),
+        },
     );
 
     let out = usage(
@@ -867,7 +934,18 @@ fn usage__json_shape() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let v: Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(v["tasks"][0]["id"], id);
-    assert!(v["tasks"][0]["buckets"][0]["tokens"]["input"].is_number());
+    let bucket = &v["tasks"][0]["buckets"][0]["tokens"];
+    // Requirement 9: every bucket's `tokens` has all five keys, always numbers.
+    assert!(bucket["input"].is_number(), "{bucket}");
+    assert!(bucket["cache_write"].is_number(), "{bucket}");
+    assert!(bucket["cache_read"].is_number(), "{bucket}");
+    assert!(bucket["output"].is_number(), "{bucket}");
+    assert!(bucket["thinking"].is_number(), "{bucket}");
+    assert_eq!(bucket["input"], 10);
+    assert_eq!(bucket["cache_write"], 4);
+    assert_eq!(bucket["cache_read"], 6);
+    assert_eq!(bucket["output"], 1);
+    assert_eq!(bucket["thinking"], 3);
     assert!(v["tasks"][0]["buckets"][0].get("cost").is_none());
     assert!(v.get("skipped").is_some());
     assert!(v.get("partial").is_some());
@@ -899,7 +977,7 @@ fn usage__note_appends_the_summary() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let shown = stdout(&task(&sb, &["show", &id], "s-24", 5));
     assert!(shown.contains("usage:"), "{shown}");
-    assert!(shown.contains("100"), "{shown}");
+    assert!(contains_number(&shown, "100"), "{shown}");
     assert!(shown.contains("rounds"), "{shown}");
 }
 
