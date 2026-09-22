@@ -50,6 +50,7 @@ backlog → ready → in_progress → review → done        (blocked is a side 
   for a handoff. A handoff says what is left, where the work is, what not to do, and how to
   resume.
 - Tasks held by a session that died return to `ready` at the next session start, with a note.
+- Cost questions are answered with `ratchet usage`, never by reading transcripts by hand.
 
 ## Where the roles come from
 

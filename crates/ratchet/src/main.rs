@@ -108,6 +108,9 @@ enum Cmd {
         all_repos: bool,
         #[arg(long)]
         json: bool,
+        /// Append the one-task summary as a note on `<id>` (requires `<id>`).
+        #[arg(long)]
+        note: bool,
     },
 }
 
@@ -415,6 +418,7 @@ fn main() {
             since,
             all_repos,
             json,
+            note,
         } => cli::usage_cmd::run(
             &env,
             cwd,
@@ -424,6 +428,7 @@ fn main() {
             since.as_deref(),
             all_repos,
             json,
+            note,
         ),
     };
     std::process::exit(code);

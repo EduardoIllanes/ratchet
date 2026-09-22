@@ -1,7 +1,9 @@
 //! `ratchet usage`: token cost per task, role and model, read from the transcripts Claude Code
 //! already writes to disk and joined with the sessions/task events ratchet already records.
-//! Read-only in this task (`--note` is Task 5's): parse, attribute, print. No SQL beyond the
-//! existing `services::{sessions, tasks, events}` reads, and `db::open_ready` only.
+//! Read-only except `--note`, which appends the one-task summary through the same
+//! `services::tasks::note` `ratchet task note` calls: parse, attribute, print (and, only with
+//! `--note`, write one note). No SQL beyond the existing `services::{sessions, tasks, events}`
+//! reads, and `db::open_ready` only.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -12,7 +14,7 @@ use serde_json::{json, Value};
 use crate::clock;
 use crate::config::{self, ModelWeights};
 use crate::db;
-use crate::model::Event;
+use crate::model::{Event, Source};
 use crate::output;
 use crate::repo::find_repo;
 use crate::services::{events, sessions, tasks};
@@ -466,11 +468,9 @@ fn trailer(collected: &Collected) -> Option<String> {
     ))
 }
 
-/// The one-task summary Requirement 10's `--note` appends (Task 5 prefixes it with `usage: `),
-/// on one paragraph — no embedded newlines.
-// Consumed by cli::usage_cmd's own `--note` handling (T-0007 Task 5); nothing in Task 4 calls it
-// yet since `--note` is explicitly not this task's flag.
-#[allow(dead_code)]
+/// The one-task summary Requirement 10's `--note` appends (prefixed with `usage: ` by
+/// `write_note`), on one paragraph — no embedded newlines. Shared with `render_task`'s own
+/// figures (both build from `task_metrics`) so the note and the `<id>` render can never drift.
 pub(crate) fn one_task_summary(collected: &Collected, task_id: &str) -> String {
     let Some(m) = task_metrics(collected, task_id) else {
         return format!("{task_id}: no usage data");
@@ -485,6 +485,45 @@ pub(crate) fn one_task_summary(collected: &Collected, task_id: &str) -> String {
         parts.push(format!("cost {c:.2}"));
     }
     parts.join(" · ")
+}
+
+/// `--note`'s write path (Requirement 10): opens its own connection — `collect`'s is long since
+/// closed by the time a render would run — resolves the session exactly as `task_cmd::face`/
+/// `attributed` do (repo thresholds when there is a repo, else defaults), and writes through the
+/// SAME `services::tasks::note` `ratchet task note` calls. A missing task fails inside that one
+/// call (`tasks::get` under the transaction), so the error text is identical by construction and
+/// no event row survives the rolled-back transaction — nothing here needs to special-case it.
+fn write_note(
+    env: &HashMap<String, String>,
+    cwd: Option<&Path>,
+    session: Option<&str>,
+    collected: &Collected,
+    task_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let home = config::ratchet_home(env);
+    let mut conn = db::open_ready(&home).map_err(|e| e.to_string())?;
+    let here = cwd
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let th = find_repo(&here)
+        .map_err(|e| e.to_string())?
+        .map(|r| r.config.thresholds)
+        .unwrap_or_default();
+    let session_id = sessions::resolve(&conn, session, env, &here, &th, now)
+        .ok()
+        .flatten();
+    let text = format!("usage: {}", one_task_summary(collected, task_id));
+    tasks::note(
+        &mut conn,
+        task_id,
+        &text,
+        Source::Cli,
+        session_id.as_deref(),
+        now,
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 fn render_task(
@@ -702,20 +741,24 @@ fn render_by(
     0
 }
 
-/// `ratchet usage` / `ratchet usage <id>` / `--by`/`--since`/`--all-repos`/`--json`. `_session`
-/// is unused in this task (Task 5's `--note` attributes its write through it via
-/// `sessions::resolve`); kept in the signature now so Task 5 never touches `main.rs`.
+/// `ratchet usage` / `ratchet usage <id>` / `--by`/`--since`/`--all-repos`/`--json`/`--note`.
+/// `--note` (Requirement 10) requires `<id>` and changes no render: it only adds the note write
+/// before the same `render_task` call the plain `usage <id>` path already makes.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     env: &HashMap<String, String>,
     cwd: Option<PathBuf>,
-    _session: Option<&str>,
+    session: Option<&str>,
     id: Option<&str>,
     by: Option<&str>,
     since: Option<&str>,
     all_repos: bool,
     json_out: bool,
+    note: bool,
 ) -> i32 {
+    if note && id.is_none() {
+        return fail("--note requires a task id: ratchet usage <id> --note");
+    }
     let by = match by {
         None => None,
         Some(raw) => match raw {
@@ -739,6 +782,11 @@ pub fn run(
         Err(e) => return fail(e),
     };
     if let Some(task_id) = id {
+        if note {
+            if let Err(e) = write_note(env, cwd.as_deref(), session, &collected, task_id, now) {
+                return fail(e);
+            }
+        }
         return render_task(&home, &collected, task_id, json_out, now);
     }
     if let Some(by) = by {
