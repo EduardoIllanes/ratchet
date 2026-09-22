@@ -221,26 +221,39 @@ enum TaskCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Mark a checklist item as done, or undo it.
+    /// Mark one or more checklist items as done, in order, or undo them. A bad number anywhere
+    /// in the list refuses the whole call before marking anything.
     Check {
         id: String,
-        position: i64,
+        #[arg(required = true, num_args = 1..)]
+        positions: Vec<i64>,
         #[arg(long)]
         undo: bool,
         #[arg(long)]
         json: bool,
     },
-    /// Record a decision or a finding on a task.
+    /// Record one or more decisions or findings on a task, each its own event, in order.
     Note {
         id: String,
-        text: String,
+        #[arg(required = true, num_args = 1..)]
+        texts: Vec<String>,
         #[arg(long)]
         json: bool,
     },
-    /// Record what is left and how to resume.
+    /// Record what is left and how to resume; `--status` also applies that transition (the same
+    /// rules `task status` applies), after the handoff is recorded either way.
     Handoff {
         id: String,
         text: String,
+        /// Move the task to this status after recording the handoff.
+        #[arg(long)]
+        status: Option<String>,
+        /// Reason forwarded to the transition; required to close a task with no checklist.
+        #[arg(long)]
+        why: Option<String>,
+        /// Owner-only escape hatch forwarded to the transition (see `task status --unreviewed`).
+        #[arg(long)]
+        unreviewed: bool,
         #[arg(long)]
         json: bool,
     },
@@ -389,16 +402,31 @@ fn main() {
             } => cli::task_cmd::review(&env, cwd, session.as_deref(), &id, &verdict, &text, json),
             TaskCmd::Check {
                 id,
-                position,
+                positions,
                 undo,
                 json,
-            } => cli::task_cmd::check(&env, cwd, session.as_deref(), &id, position, undo, json),
-            TaskCmd::Note { id, text, json } => {
-                cli::task_cmd::note(&env, cwd, session.as_deref(), &id, &text, json)
+            } => cli::task_cmd::check(&env, cwd, session.as_deref(), &id, &positions, undo, json),
+            TaskCmd::Note { id, texts, json } => {
+                cli::task_cmd::note(&env, cwd, session.as_deref(), &id, &texts, json)
             }
-            TaskCmd::Handoff { id, text, json } => {
-                cli::task_cmd::handoff(&env, cwd, session.as_deref(), &id, &text, json)
-            }
+            TaskCmd::Handoff {
+                id,
+                text,
+                status,
+                why,
+                unreviewed,
+                json,
+            } => cli::task_cmd::handoff(
+                &env,
+                cwd,
+                session.as_deref(),
+                &id,
+                &text,
+                status.as_deref(),
+                why.as_deref(),
+                unreviewed,
+                json,
+            ),
             TaskCmd::Archive { id, json } => {
                 cli::task_cmd::archive(&env, cwd, session.as_deref(), &id, json)
             }

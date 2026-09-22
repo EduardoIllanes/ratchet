@@ -48,11 +48,12 @@ self-reviewed, placeholder-shipping, branch-left-red change (T-0006, 2026-09-22)
 
 - [ ] **Session start**: `ratchet task list` and read the last handoff of anything you hold or
       are about to take. Never start blind to what the last session said.
-- [ ] **Claim**: `ratchet task claim <id>` before touching a file for that task. An unclaimed
-      task has no session to hold it accountable.
-- [ ] **Progress**: `ratchet task check <id> <n>` the moment a checklist item is actually met,
-      and `ratchet task note "…"` for every non-obvious decision — before you act on it, not
-      after.
+- [ ] **Claim**: `ratchet task claim <id>` before touching a file for that task. One call already
+      leaves it `in_progress` (through `ready` first if it was in `backlog`) — no separate
+      `status` call. An unclaimed task has no session to hold it accountable.
+- [ ] **Progress**: `ratchet task check <id> <n> [<n> …]` the moment one or more checklist items
+      are actually met — batch them in one call, in order — and `ratchet task note <id> "…" ["…"
+      …]` for every non-obvious decision, also batchable — before you act on it, not after.
 - [ ] **Before `status <id> review`**: run the gate (`cargo fmt --check`, `cargo clippy
       --all-targets -- -D warnings`, `cargo test`, or whatever the repo documents) on the
       **target branch, after merging your work into it** — not only inside your worktree. A
@@ -66,9 +67,11 @@ self-reviewed, placeholder-shipping, branch-left-red change (T-0006, 2026-09-22)
       the check here is so you never find that out from a refusal mid-close.
 - [ ] **Nothing named `scratch`, `probe`, or `placeholder` is committed.** A probe lives in the
       job's temp directory or the session scratchpad, never in the repo, never in a commit.
-- [ ] **End**: `ratchet task handoff <id> "…"` — what is left, where the work is, what not to
-      do, how to resume. A session that closes an `in_progress` task with nothing recorded
-      leaves the next one guessing.
+- [ ] **End**: `ratchet task handoff <id> "…" --status review` — what is left, where the work is,
+      what not to do, how to resume, and the move to `review` in the same call (`--status`
+      applies the same transition rules `status` does, including `--why` and `--unreviewed`; a
+      refused transition still leaves the handoff recorded). A session that closes an
+      `in_progress` task with nothing recorded leaves the next one guessing.
 
 The owner alone may skip the review with `ratchet task status <id> done --unreviewed`; it still
 requires a complete checklist, and it leaves a note on the board saying so. Nobody else uses it —

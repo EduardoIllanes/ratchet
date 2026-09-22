@@ -14,23 +14,30 @@ through the `ratchet` CLI (the plugin puts it on your path; `ratchet --help` lis
 1. **Look before you claim**: `ratchet task list` is the repo's board (`--mine`, `--status ready`,
    `--tag <t>`); `ratchet task show T-0042` gives one task's body, checklist, last handoff and
    last ten events.
-2. **Claim**: `ratchet task claim T-0042`. It becomes `in_progress` under your session. If another
-   live session holds it, the CLI says so: do not force it, pick another or tell the owner.
-3. **Advance by checklist**: each criterion met → `ratchet task check T-0042 <n>`. Progress is
-   *only* that; there is no "about 60 % done".
-4. **Leave a trail**: `ratchet task note T-0042 "found X, decided Y"` whenever you take a decision
-   the next person needs. If you are stuck: `ratchet task status T-0042 blocked --why "…"`.
+2. **Claim**: `ratchet task claim T-0042`. One call already leaves it `in_progress` under your
+   session (through `ready` first if it was in `backlog`) — no separate `status` call needed. If
+   another live session holds it, the CLI says so: do not force it, pick another or tell the owner.
+3. **Advance by checklist**: `ratchet task check T-0042 1 2 3` marks several items done in one
+   call, in order — a bad number refuses the whole call before marking anything, so it is always
+   safe to batch every criterion you just met. Progress is *only* that; there is no "about 60 %
+   done".
+4. **Leave a trail**: `ratchet task note T-0042 "found X" "decided Y"` whenever you take a
+   decision the next person needs — one call, several notes, each its own event. If you are
+   stuck: `ratchet task status T-0042 blocked --why "…"`.
 5. **Before ending your reply**: if the task is still `in_progress` and you recorded nothing this
    turn, the Stop hook will ask for a handoff once. Write a good one (below).
-6. **Close**: `ratchet task status T-0042 review` (or `done` when the checklist is complete;
-   without a checklist, `done --why "…"`). `done` refuses without an independent review verdict
-   — a different session must first run `ratchet task review T-0042 approve "…"`; the owner
-   alone bypasses this with `--unreviewed`.
+6. **Close in one call**: `ratchet task handoff T-0042 "…" --status review` records the handoff
+   and moves the task in the same call (or `--status done` when the checklist is complete;
+   without a checklist, add `--why "…"`). `done` refuses without an independent review verdict —
+   a different session must first run `ratchet task review T-0042 approve "…"`; the owner alone
+   bypasses this with `--unreviewed`. A refused transition still leaves the handoff recorded, so
+   this is always safe to try.
 
 ## A useful handoff
 
-`ratchet task handoff T-0042 "…"` is the first thing the next session reads (you tomorrow, or
-another agent). In 2-5 lines it answers:
+`ratchet task handoff T-0042 "…"` (optionally with `--status <state>`, `--why "…"` and
+`--unreviewed`, applying the same rules as `task status`) is the first thing the next session
+reads (you tomorrow, or another agent). In 2-5 lines it answers:
 
 - **What is left**, concretely: "edge-case test in `x.py` missing; 3/5 of the checklist".
 - **Where the work is**: branch/worktree, files touched, whether there is a commit.

@@ -164,12 +164,18 @@ Work lives in tasks, and a task moves only in ways you can check afterwards.
     ratchet task list --mine --status in_progress
     ratchet task show T-0042                # body, checklist, last handoff, last ten events
     ratchet task new "Port the parser" -c "tests green" -c "docs updated"
-    ratchet task claim T-0042               # takes it for your session
-    ratchet task check T-0042 1             # one acceptance criterion met
-    ratchet task note T-0042 "found X, decided Y"
-    ratchet task handoff T-0042 "what is left and how to resume"
-    ratchet task status T-0042 review       # or done, when the checklist is complete
+    ratchet task claim T-0042               # one call: takes it, already in_progress
+    ratchet task check T-0042 1 2           # one or more criteria met, in order, in one call
+    ratchet task note T-0042 "found X" "decided Y"    # one or more notes, in one call
+    ratchet task handoff T-0042 "what is left and how to resume" --status review
     ratchet task archive T-0042             # a reviewed done task leaves the board
+
+`claim` puts a task in `in_progress` in the same call (through `ready` first if it was in
+`backlog`). `check` and `note` each take one or more values and apply them in order, one event
+per value; a bad checklist number in a `check` call refuses the whole call before marking
+anything. `handoff`'s `--status <state>` applies the same transition `ratchet task status` would
+— including `--why` and the owner's `--unreviewed` — after recording the handoff; a refused
+transition still leaves the handoff recorded.
 
 Identifiers are `T-0001`, `T-0002`, … from a sequence that never reuses a number. A task carries a
 title, a body, a priority from 1 to 4, tags, an optional parent, and the checklist that is its
