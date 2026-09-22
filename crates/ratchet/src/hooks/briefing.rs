@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 
 use crate::config::Thresholds;
+use crate::guardrails::rules::DroppedRule;
 use crate::model::{Session, Task, TaskStatus};
 use crate::output;
 use crate::services::tasks;
@@ -20,12 +21,17 @@ pub const MAX_READY: usize = 5;
 pub const COMMANDS_LINE: &str =
     "Commands: ratchet task show|claim|check|note|handoff  ·  full guide: skill ratchet-tasks";
 
-pub fn build(
+/// The `[ratchet]` briefing. `dropped_rules` adds one line per guardrail rule dropped this load
+/// (T-0015: a rule that fails validation is left out of the merged set, not fatal, so the repo
+/// owner needs to learn about it somewhere other than `ratchet.log`); pass `&[]` when there are
+/// none.
+pub fn build_full(
     conn: &Connection,
     session: &Session,
     main_root: &Path,
     th: &Thresholds,
     now: DateTime<Utc>,
+    dropped_rules: &[DroppedRule],
 ) -> String {
     let header = format!(
         "[ratchet] repo {} · session {} · branch {}",
@@ -34,6 +40,7 @@ pub fn build(
         session.branch.as_deref().unwrap_or("?")
     );
     let rules_line = agents_md_line(main_root);
+    let dropped_lines: Vec<String> = dropped_rules.iter().map(dropped_rule_line).collect();
     let map_line = crate::map::briefing_line(main_root);
     let orphans = tasks::orphaned(conn, &session.repo_root, th, now).unwrap_or_default();
     let mine = tasks::list(
@@ -61,11 +68,13 @@ pub fn build(
     if orphans.is_empty() && mine.is_empty() && ready.is_empty() {
         let mut lines = vec![header];
         lines.extend(rules_line.clone());
+        lines.extend(dropped_lines.clone());
         lines.extend(map_line.clone());
         return lines.join("\n");
     }
     let mut lines = vec![header];
     lines.extend(rules_line.clone());
+    lines.extend(dropped_lines.clone());
     if !mine.is_empty() {
         lines.push("Your tasks in progress:".to_string());
         lines.extend(mine.iter().map(|t| task_line(conn, t, true)));
@@ -85,11 +94,11 @@ pub fn build(
     }
     lines.push(COMMANDS_LINE.to_string());
     // The map line is dropped first (design §4.3): only inserted when the rest already fits.
-    // The rules line (just added above, if any) always stays; it sits right after the header,
-    // so the map line goes one slot further in when both are present.
+    // The rules line and the dropped-rule lines (just added above, if any) always stay; they
+    // sit right after the header, so the map line goes that many slots further in.
     if let Some(l) = &map_line {
         if lines.len() < MAX_LINES {
-            let insert_at = if rules_line.is_some() { 2 } else { 1 };
+            let insert_at = 1 + rules_line.is_some() as usize + dropped_lines.len();
             lines.insert(insert_at, l.clone());
         }
     }
@@ -99,6 +108,17 @@ pub fn build(
         lines.push(COMMANDS_LINE.to_string());
     }
     lines.join("\n")
+}
+
+/// One line naming a dropped guardrail rule, its file and a human reason (T-0015) -- truncated
+/// so one long `reason` cannot itself blow the briefing's line budget.
+fn dropped_rule_line(d: &DroppedRule) -> String {
+    format!(
+        "[ratchet] guardrail rule `{}` dropped ({}): {}",
+        d.id,
+        d.file.display(),
+        quote(&d.reason, 80)
+    )
 }
 
 /// `Some("rules: AGENTS.md")` when the repo has an `AGENTS.md` at its root; `None` otherwise.
@@ -439,12 +459,13 @@ mod tests {
     #[test]
     fn a_quiet_repo_with_no_map_adds_the_map_none_line() {
         let (conn, session) = setup("session-abcdef0123");
-        let text = build(
+        let text = build_full(
             &conn,
             &session,
             Path::new("root"),
             &Thresholds::default(),
             at("2026-09-16T12:01:00Z"),
+            &[],
         );
         assert_eq!(text.lines().count(), 2, "{text}");
         // G2-P7(a): `short("session-abcdef0123")` keeps the hyphen inside its 8-char window, so
@@ -465,12 +486,13 @@ mod tests {
         let (conn, session) = setup("session-abcdef0123");
         let d = tempfile::TempDir::new().unwrap();
         std::fs::write(d.path().join("AGENTS.md"), "# doctrine\n").unwrap();
-        let text = build(
+        let text = build_full(
             &conn,
             &session,
             d.path(),
             &Thresholds::default(),
             at("2026-09-16T12:01:00Z"),
+            &[],
         );
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.get(1), Some(&"rules: AGENTS.md"), "{text}");
@@ -484,12 +506,13 @@ mod tests {
     #[test]
     fn no_agents_md_means_no_rules_line() {
         let (conn, session) = setup("session-abcdef0123");
-        let text = build(
+        let text = build_full(
             &conn,
             &session,
             Path::new("root"),
             &Thresholds::default(),
             at("2026-09-16T12:01:00Z"),
+            &[],
         );
         assert!(!text.contains("AGENTS.md"), "{text}");
     }
@@ -523,12 +546,13 @@ mod tests {
         .unwrap();
         crate::map::write_map(d.path(), &generated).unwrap();
 
-        let text = build(
+        let text = build_full(
             &conn,
             &session,
             d.path(),
             &Thresholds::default(),
             at("2026-09-16T12:01:00Z"),
+            &[],
         );
         assert_eq!(text.lines().count(), 1, "{text}");
         assert!(
@@ -602,12 +626,13 @@ mod tests {
         )
         .unwrap();
 
-        let text = build(
+        let text = build_full(
             &conn,
             &session,
             Path::new("root"),
             &Thresholds::default(),
             now,
+            &[],
         );
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with("[ratchet] repo demo"), "{text}");
@@ -647,12 +672,13 @@ mod tests {
             )
             .unwrap();
         }
-        let text = build(
+        let text = build_full(
             &conn,
             &session,
             Path::new("root"),
             &Thresholds::default(),
             at("2026-09-16T12:02:00Z"),
+            &[],
         );
         // G2-P7(b): `format_task_line`'s `{:<12}` pads the status "ready" with trailing spaces,
         // so `text.matches("ready ").count()` double-counts (the padded status matches too),
@@ -699,12 +725,13 @@ mod tests {
             )
             .unwrap();
         }
-        let text = build(
+        let text = build_full(
             &conn,
             &session,
             Path::new("root"),
             &Thresholds::default(),
             at("2026-09-16T12:03:00Z"),
+            &[],
         );
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), MAX_LINES, "{}", lines.len());

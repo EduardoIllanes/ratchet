@@ -323,17 +323,27 @@ pub fn session_start(
         register(&mut conn, &repo, &session_id, cwd, env, now).map_err(|e| e.to_string())?;
     export_session_id(env, &session.id);
 
+    // A guardrail rule that fails validation is dropped, not fatal (T-0015): named here so the
+    // repo owner learns about it from the briefing, not only from `ratchet.log`. A genuinely
+    // broken machine/`extra` file (out of scope; unparseable, same as a broken `ratchet.toml`)
+    // falls back to no dropped-rule lines rather than costing the rest of the briefing, matching
+    // every other query in this module.
+    let dropped_rules = load_rule_set(home, Some(&repo))
+        .map(|s| s.dropped)
+        .unwrap_or_default();
+
     // The briefing is built HERE, with this same `now`, BEFORE the sweep below, so an orphaned
     // task is shown once with its last handoff while it is still claimed. Do not move the sweep
     // above this line.
     println!(
         "{}",
-        briefing::build(
+        briefing::build_full(
             &conn,
             &session,
             &repo.main_root,
             &repo.config.thresholds,
-            now
+            now,
+            &dropped_rules,
         )
     );
 
