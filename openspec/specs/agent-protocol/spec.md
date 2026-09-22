@@ -72,10 +72,16 @@ A repo SHALL also be able to declare guardrail rules inline in its own `ratchet.
 command segment, the same matcher the built-in command rules use), `message`, and an optional
 `tools` list (default `["Bash", "PowerShell"]`). Because there is no separate `alternative`
 field here, the `message` SHALL itself state the alternative — contain a form of "use" or
-"instead" — and SHALL NOT be empty; either failure, and an unknown key, SHALL be refused on
-load with an error naming the rule. Inline rules SHALL be appended after every built-in and
-`extra`-file rule, so with an overlapping pattern an earlier rule wins, and SHALL otherwise
-evaluate with the same block/allow semantics and the same exit code as any other rule.
+"instead" — and SHALL NOT be empty; either failure, an unknown key, or an explicit empty
+`tools = []`, SHALL be refused on load with an error naming the rule. Inline rules SHALL be
+appended after every built-in and `extra`-file rule, so with an overlapping `match` pattern an
+earlier rule still wins; this is distinct from an inline rule's `name` equalling the id of a
+built-in rule (`python-venv`, `git-destructive`, `env-files`, `main-tree`, `big-read`), which is
+never appended alongside it — inline rules are command-only, so replacing a non-command built-in
+this way would silently disable it, and SHALL instead be refused on load with an error naming
+the rule, its colliding id, and the alternative (choose another name, or disable the built-in
+with `off = [...]`). Otherwise an inline rule SHALL evaluate with the same block/allow semantics
+and the same exit code as any other rule.
 
 #### Scenario: Custom rule declared inline in ratchet.toml blocks
 - **WHEN** `ratchet.toml` declares `[[guardrails.rules]]` with `name = "no-curl"`, `match = '^\s*curl\b'`, `message = "Use the repo's fetch script instead."` and the tool call is `curl https://example.com`
@@ -95,6 +101,18 @@ evaluate with the same block/allow semantics and the same exit code as any other
 
 #### Scenario: Inline custom rule with no stated alternative is refused
 - **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry whose `message` says neither "use" nor "instead"
+- **THEN** `ratchet guardrails list` exits 1 and stderr names the rule
+
+#### Scenario: Inline rule colliding with a builtin id is refused
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry with `name = "env-files"`
+- **THEN** `ratchet guardrails list` exits 1 and stderr names `env-files`, `ratchet.toml`, and the alternative of renaming the rule or disabling the built-in with `off`
+
+#### Scenario: Inline rule colliding with a non-command builtin id is refused
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry with `name = "main-tree"`
+- **THEN** `ratchet guardrails list` exits 1 and stderr names `main-tree`
+
+#### Scenario: Inline custom rule with empty tools is refused
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry with `tools = []`
 - **THEN** `ratchet guardrails list` exits 1 and stderr names the rule
 
 #### Scenario: Python outside the venv

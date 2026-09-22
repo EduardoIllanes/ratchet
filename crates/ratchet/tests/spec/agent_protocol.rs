@@ -568,6 +568,48 @@ fn agent_protocol__inline_custom_rule_with_no_stated_alternative_is_refused() {
     assert!(stderr(&out).contains("no-curl"), "{}", stderr(&out));
 }
 
+#[test]
+fn agent_protocol__inline_rule_colliding_with_a_builtin_id_is_refused() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"env-files\"\nmatch = 'never-matches-anything'\nmessage = \"use x instead\"\n",
+    );
+    let root = sb.root();
+    let out = guardrails(&sb, &["list"], &root);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("env-files"), "{err}");
+    assert!(err.contains("ratchet.toml"), "{err}");
+    assert!(
+        err.contains("off") || err.contains("rename") || err.contains("another name"),
+        "expected the alternative (rename or `off = [...]`) in: {err}"
+    );
+}
+
+#[test]
+fn agent_protocol__inline_rule_colliding_with_a_non_command_builtin_id_is_refused() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"main-tree\"\nmatch = 'never-matches-anything'\nmessage = \"use x instead\"\n",
+    );
+    let root = sb.root();
+    let out = guardrails(&sb, &["list"], &root);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    assert!(stderr(&out).contains("main-tree"), "{}", stderr(&out));
+}
+
+#[test]
+fn agent_protocol__inline_custom_rule_with_empty_tools_is_refused() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"no-curl\"\nmatch = '^curl'\nmessage = \"Use the fetch script instead.\"\ntools = []\n",
+    );
+    let root = sb.root();
+    let out = guardrails(&sb, &["list"], &root);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    assert!(stderr(&out).contains("no-curl"), "{}", stderr(&out));
+}
+
 // --- Requirement: Main-tree writes detected after the fact -------------------------
 
 #[test]
