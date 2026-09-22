@@ -32,10 +32,15 @@ Cost of the hot path: the guardrail hook does 11-13 ms of its own work per tool 
     claude plugin install ratchet@ratchet
 
 That is all. The first time a hook runs it downloads the prebuilt `ratchet` binary for your
-platform (macOS arm64/x64, Linux x64, Windows x64) from the release matching the plugin
-version, verifies its SHA-256 against the release's `SHA256SUMS.txt`, and puts it in the
-plugin's `bin/`. No Rust, no PATH changes, nothing installed anywhere else. Updating the plugin
-repeats this for the new version.
+platform (macOS arm64/x64, Linux x64, Windows x64) from the release pinned in
+`.claude-plugin/binary-version`, verifies its SHA-256 against the release's `SHA256SUMS.txt`,
+and puts it in the plugin's `bin/`. No Rust, no PATH changes, nothing installed anywhere else.
+
+The plugin manifest carries no version on purpose: Claude Code tracks the marketplace commit,
+so `claude plugin update ratchet@ratchet` picks up every change to agents, skills and hooks
+without waiting for a binary release. Each update lands in a fresh plugin dir, and the first
+hook there downloads the pinned binary again (a few MB). A new binary ships as a tagged release
+that bumps `Cargo.toml` and `binary-version` together.
 
 Then opt a repo in. Open a Claude Code session at its root and run:
 
@@ -46,7 +51,7 @@ Code adds that directory to the PATH of its own sessions. So every `ratchet ...`
 README runs inside a session, either through the `!` prefix (`! ratchet task list`) or by
 letting the agent run it. To use it from a terminal, put that `bin/` on your PATH or link the
 binary, for example `ln -s "<plugin dir>/bin/ratchet" ~/.local/bin/ratchet`; the link breaks
-when the plugin updates to a new version, because the plugin dir contains the version.
+on every plugin update, because the plugin dir is named after the marketplace commit.
 
 If the download cannot happen (offline, unsupported platform, checksum mismatch), the hook
 prints one line and exits 0; the session is not affected, and the hooks stay quiet for an hour

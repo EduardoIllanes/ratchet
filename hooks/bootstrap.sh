@@ -36,10 +36,12 @@ if [ -f "$stamp" ]; then
     rm -f "$stamp"
 fi
 
-# 1. Version, from plugin.json.
-version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" 2>/dev/null | head -1)"
+# 1. Version of the binary to fetch, from .claude-plugin/binary-version (one line). It is
+# deliberately not plugin.json's version: the plugin carries none, so Claude Code tracks the
+# marketplace commit and agent/skill edits ship without a binary release.
+version="$(head -1 "$root/.claude-plugin/binary-version" 2>/dev/null | tr -d '[:space:]')"
 if [ -z "${version:-}" ]; then
-    fail "cannot read version from plugin.json"
+    fail "cannot read .claude-plugin/binary-version"
 fi
 
 # 2. Target: platform map, overridable by RATCHET_OS/RATCHET_ARCH for tests.

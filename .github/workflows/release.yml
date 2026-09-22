@@ -12,7 +12,7 @@ env:
 
 jobs:
   check-version:
-    name: tag matches Cargo.toml and plugin.json
+    name: tag matches Cargo.toml and binary-version
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -23,10 +23,10 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME#v}"
           cargo_v="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/ratchet/Cargo.toml | head -1)"
-          plugin_v="$(python3 -c 'import json;print(json.load(open(".claude-plugin/plugin.json"))["version"])')"
-          echo "tag=$tag cargo=$cargo_v plugin=$plugin_v"
-          if [ "$tag" != "$cargo_v" ] || [ "$tag" != "$plugin_v" ]; then
-            echo "::error::tag v$tag does not match Cargo.toml ($cargo_v) and plugin.json ($plugin_v)"
+          pinned_v="$(head -1 .claude-plugin/binary-version | tr -d '[:space:]')"
+          echo "tag=$tag cargo=$cargo_v binary-version=$pinned_v"
+          if [ "$tag" != "$cargo_v" ] || [ "$tag" != "$pinned_v" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml ($cargo_v) and .claude-plugin/binary-version ($pinned_v)"
             exit 1
           fi
           echo "version=$tag" >> "$GITHUB_OUTPUT"

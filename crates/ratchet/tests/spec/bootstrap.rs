@@ -47,6 +47,10 @@ fn host_target() -> &'static str {
     }
 }
 
+/// The version every scenario pins and fakes a release for: the crate's own, because the fake
+/// release wraps the real test binary and its `version` output must match.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 fn stamp_path(root: &Path) -> PathBuf {
     root.join("bin").join(".bootstrap-failed")
 }
@@ -55,16 +59,21 @@ fn installed_bin_path(root: &Path) -> PathBuf {
     root.join("bin").join(bin_name())
 }
 
-/// A fresh plugin directory: `.claude-plugin/plugin.json` at `version`, the real
-/// `hooks/run-hook.cmd` and `hooks/bootstrap.sh` copied from the repository, and an empty
-/// `bin/`.
+/// A fresh plugin directory: a version-less `.claude-plugin/plugin.json`,
+/// `.claude-plugin/binary-version` at `version`, the real `hooks/run-hook.cmd` and
+/// `hooks/bootstrap.sh` copied from the repository, and an empty `bin/`.
 fn fake_plugin(version: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     fs::create_dir_all(root.join(".claude-plugin")).unwrap();
     fs::write(
         root.join(".claude-plugin/plugin.json"),
-        format!("{{\"name\":\"ratchet\",\"version\":\"{version}\"}}"),
+        "{\"name\":\"ratchet\"}",
+    )
+    .unwrap();
+    fs::write(
+        root.join(".claude-plugin/binary-version"),
+        format!("{version}\n"),
     )
     .unwrap();
     fs::create_dir_all(root.join("hooks")).unwrap();
@@ -253,10 +262,10 @@ fn run_bootstrap(root: &Path, envs: &[(&str, &str)]) -> Output {
 
 #[test]
 fn bootstrap__first_run_downloads_verifies_and_runs_the_binary() {
-    let plugin = fake_plugin("0.1.0");
+    let plugin = fake_plugin(VERSION);
     let root = plugin.path();
     let release = TempDir::new().unwrap();
-    fake_release(release.path(), "0.1.0", host_target(), true);
+    fake_release(release.path(), VERSION, host_target(), true);
 
     let out = run_wrapper(
         root,
@@ -265,7 +274,7 @@ fn bootstrap__first_run_downloads_verifies_and_runs_the_binary() {
     );
 
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
-    assert_eq!(stdout(&out).trim(), "ratchet 0.1.0");
+    assert_eq!(stdout(&out).trim(), format!("ratchet {VERSION}"));
     assert!(installed_bin_path(root).exists());
     let err = stderr(&out);
     let lines: Vec<&str> = err.lines().collect();
@@ -276,10 +285,10 @@ fn bootstrap__first_run_downloads_verifies_and_runs_the_binary() {
 
 #[test]
 fn bootstrap__checksum_mismatch_refuses_the_download() {
-    let plugin = fake_plugin("0.1.0");
+    let plugin = fake_plugin(VERSION);
     let root = plugin.path();
     let release = TempDir::new().unwrap();
-    fake_release(release.path(), "0.1.0", host_target(), false);
+    fake_release(release.path(), VERSION, host_target(), false);
 
     let out = run_wrapper(
         root,
@@ -308,7 +317,7 @@ fn bootstrap__checksum_mismatch_refuses_the_download() {
 
 #[test]
 fn bootstrap__a_failed_bootstrap_is_silent_until_the_stamp_expires() {
-    let plugin = fake_plugin("0.1.0");
+    let plugin = fake_plugin(VERSION);
     let root = plugin.path();
     // An existing, empty directory: the asset is never there, so every download fails.
     let empty_release = TempDir::new().unwrap();
@@ -344,21 +353,21 @@ fn bootstrap__a_failed_bootstrap_is_silent_until_the_stamp_expires() {
     age_stamp(&stamp_path(root));
 
     let release = TempDir::new().unwrap();
-    fake_release(release.path(), "0.1.0", host_target(), true);
+    fake_release(release.path(), VERSION, host_target(), true);
     let third = run_wrapper(
         root,
         &["version"],
         &[("RATCHET_RELEASE_BASE", &file_url(release.path()))],
     );
     assert_eq!(code(&third), 0, "stderr: {}", stderr(&third));
-    assert_eq!(stdout(&third).trim(), "ratchet 0.1.0");
+    assert_eq!(stdout(&third).trim(), format!("ratchet {VERSION}"));
     assert!(installed_bin_path(root).exists());
     assert!(!stamp_path(root).exists());
 }
 
 #[test]
 fn bootstrap__unsupported_platform_is_reported_once() {
-    let plugin = fake_plugin("0.1.0");
+    let plugin = fake_plugin(VERSION);
     let root = plugin.path();
     // Never reached (target resolution fails first), but set anyway so no test can ever
     // accidentally reach the real network.
@@ -409,7 +418,7 @@ fn bootstrap__unsupported_platform_is_reported_once() {
 
 #[test]
 fn bootstrap__an_existing_binary_is_never_re_downloaded() {
-    let plugin = fake_plugin("0.1.0");
+    let plugin = fake_plugin(VERSION);
     let root = plugin.path();
     let bin_path = installed_bin_path(root);
     fs::copy(ratchet_bin(), &bin_path).unwrap();
@@ -430,13 +439,13 @@ fn bootstrap__an_existing_binary_is_never_re_downloaded() {
     );
 
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
-    assert_eq!(stdout(&out).trim(), "ratchet 0.1.0");
+    assert_eq!(stdout(&out).trim(), format!("ratchet {VERSION}"));
     assert!(!stamp_path(root).exists());
 }
 
 #[test]
 fn bootstrap__download_failure_names_the_manual_path() {
-    let plugin = fake_plugin("0.1.0");
+    let plugin = fake_plugin(VERSION);
     let root = plugin.path();
 
     // Run 1: an existing, empty directory — no asset, no sums. The scenario's literal WHEN
@@ -468,7 +477,7 @@ fn bootstrap__download_failure_names_the_manual_path() {
     // Run 2: SHA256SUMS.txt present, the asset missing — SHA256SUMS.txt is fetched first (I1a),
     // succeeds, and the failure still correctly names the asset it could not then download.
     let sums_only = TempDir::new().unwrap();
-    let name = asset_name("0.1.0", host_target());
+    let name = asset_name(VERSION, host_target());
     fs::write(
         sums_only.path().join("SHA256SUMS.txt"),
         format!("{}  {name}\n", "0".repeat(64)),
@@ -507,7 +516,7 @@ fn bootstrap__download_failure_names_the_manual_path() {
     // Run 3: the asset present, SHA256SUMS.txt missing — SHA256SUMS.txt is fetched first (I1a)
     // and fails there, before the asset is ever requested.
     let asset_only = TempDir::new().unwrap();
-    build_asset(asset_only.path(), "0.1.0", host_target());
+    build_asset(asset_only.path(), VERSION, host_target());
     let asset_only_base = file_url(asset_only.path());
     let out3 = run_wrapper(
         root,
