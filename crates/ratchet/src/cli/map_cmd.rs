@@ -21,15 +21,31 @@ fn not_a_repo(here: &std::path::Path) -> i32 {
     1
 }
 
-/// `ratchet map` / `ratchet map --wire`. The wiring itself is Task 5; this task only prints the
-/// hints `map::generate` already computes.
-pub fn generate(_wire: bool, env: &HashMap<String, String>, cwd: Option<PathBuf>) -> i32 {
+/// `ratchet map` / `ratchet map --wire`. When `wire` is set, wiring runs first, so a refusal
+/// (a symlinked `CLAUDE.md` or `.gitignore`) leaves the map itself unwritten too.
+pub fn generate(wire: bool, env: &HashMap<String, String>, cwd: Option<PathBuf>) -> i32 {
     let here = cwd.unwrap_or_else(|| PathBuf::from("."));
     let repo = match find_repo(&here) {
         Ok(Some(r)) => r,
         Ok(None) => return not_a_repo(&here),
         Err(e) => return fail(e),
     };
+    if wire {
+        match crate::map::wire(&repo.main_root) {
+            Ok(r) if !r.claude_md_changed && !r.gitignore_changed => {
+                println!("wire: already wired (CLAUDE.md, .gitignore)");
+            }
+            Ok(r) => {
+                if r.claude_md_changed {
+                    println!("wired: CLAUDE.md now imports .ratchet/map.md");
+                }
+                if r.gitignore_changed {
+                    println!("wired: .gitignore now covers .ratchet/");
+                }
+            }
+            Err(e) => return fail(e),
+        }
+    }
     let now = clock::now(env);
     let generated = match crate::map::generate(&repo.main_root, &repo.config.map, now) {
         Ok(g) => g,

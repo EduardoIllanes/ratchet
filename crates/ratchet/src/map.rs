@@ -809,6 +809,74 @@ pub fn write_map(main_root: &Path, generated: &Generated) -> Result<PathBuf, Map
     Ok(path)
 }
 
+// --- `--wire`: CLAUDE.md import + .gitignore entry ------------------------------------------
+
+pub struct WireResult {
+    pub claude_md_changed: bool,
+    pub gitignore_changed: bool,
+}
+
+const CLAUDE_IMPORT_BLOCK: &str = "<!-- ratchet map: this repo's layout, generated on demand, never by hand. -->\n<!-- refresh with `/ratchet:map`; do not edit `.ratchet/map.md` directly. -->\n@.ratchet/map.md\n";
+
+fn is_regular_file(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_file())
+        .unwrap_or(false)
+}
+
+/// Appends the `CLAUDE.md` import block and the `.gitignore` entry, creating either file if
+/// absent. Idempotent: a field is `false` in the result when that file already had what it
+/// needed, and nothing is written to it. Refuses, before touching either file, when `CLAUDE.md`
+/// or `.gitignore` exists but is not a regular file (a symlink or a directory) — this is why
+/// the CLI calls `wire` *before* `generate`/`write_map` when `--wire` is given: a refusal here
+/// must leave the map itself unwritten too.
+pub fn wire(main_root: &Path) -> Result<WireResult, MapError> {
+    let claude_path = main_root.join("CLAUDE.md");
+    if claude_path.exists() && !is_regular_file(&claude_path) {
+        return Err(err("CLAUDE.md is not a regular file; refusing to touch it"));
+    }
+    let gitignore_path = main_root.join(".gitignore");
+    if gitignore_path.exists() && !is_regular_file(&gitignore_path) {
+        return Err(err(
+            ".gitignore is not a regular file; refusing to touch it",
+        ));
+    }
+
+    let claude_text = fs::read_to_string(&claude_path).unwrap_or_default();
+    let claude_md_changed = !claude_text.contains("@.ratchet/map.md");
+    if claude_md_changed {
+        let mut new_text = claude_text;
+        if !new_text.is_empty() && !new_text.ends_with('\n') {
+            new_text.push('\n');
+        }
+        if !new_text.is_empty() {
+            new_text.push('\n');
+        }
+        new_text.push_str(CLAUDE_IMPORT_BLOCK);
+        fs::write(&claude_path, new_text)
+            .map_err(|e| err(format!("could not write CLAUDE.md: {e}")))?;
+    }
+
+    let gitignore_text = fs::read_to_string(&gitignore_path).unwrap_or_default();
+    let gitignore_changed = !gitignore_text
+        .lines()
+        .any(|l| matches!(l.trim(), ".ratchet/" | ".ratchet"));
+    if gitignore_changed {
+        let mut new_text = gitignore_text;
+        if !new_text.is_empty() && !new_text.ends_with('\n') {
+            new_text.push('\n');
+        }
+        new_text.push_str(".ratchet/\n");
+        fs::write(&gitignore_path, new_text)
+            .map_err(|e| err(format!("could not write .gitignore: {e}")))?;
+    }
+
+    Ok(WireResult {
+        claude_md_changed,
+        gitignore_changed,
+    })
+}
+
 // --- freshness: shared by `map status` (Task 2) and the briefing line (Task 4) ----------------
 
 pub fn recorded_commit(main_root: &Path) -> Option<String> {
@@ -1059,5 +1127,33 @@ mod tests {
         let cfg = MapSection::default();
         let out = missing(d.path(), &cfg, true).unwrap();
         assert_eq!(out, vec!["b.rs".to_string()]);
+    }
+
+    #[test]
+    fn wire_creates_both_files_when_absent() {
+        let d = repo();
+        let r = wire(d.path()).unwrap();
+        assert!(r.claude_md_changed && r.gitignore_changed);
+        assert!(fs::read_to_string(d.path().join("CLAUDE.md"))
+            .unwrap()
+            .contains("@.ratchet/map.md"));
+        assert!(fs::read_to_string(d.path().join(".gitignore"))
+            .unwrap()
+            .contains(".ratchet/"));
+    }
+
+    #[test]
+    fn wire_appends_without_disturbing_existing_content() {
+        let d = repo();
+        fs::write(d.path().join("CLAUDE.md"), "# My rules\n\nDo the thing.\n").unwrap();
+        fs::write(d.path().join(".gitignore"), "target/\n").unwrap();
+        let r = wire(d.path()).unwrap();
+        assert!(r.claude_md_changed && r.gitignore_changed);
+        let claude = fs::read_to_string(d.path().join("CLAUDE.md")).unwrap();
+        assert!(claude.starts_with("# My rules"), "{claude}");
+        assert!(claude.contains("@.ratchet/map.md"), "{claude}");
+        let gitignore = fs::read_to_string(d.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains("target/"), "{gitignore}");
+        assert!(gitignore.contains(".ratchet/"), "{gitignore}");
     }
 }

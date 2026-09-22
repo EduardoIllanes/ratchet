@@ -77,6 +77,9 @@ enum Cmd {
         /// map's recorded commit.
         #[arg(long)]
         all: bool,
+        /// Wire CLAUDE.md and .gitignore, then generate.
+        #[arg(long)]
+        wire: bool,
     },
     /// Extract text from a local PDF via the external `liteparse` CLI.
     Pdf {
@@ -377,11 +380,16 @@ fn main() {
                 cli::task_cmd::unarchive(&env, cwd, session.as_deref(), &id, json)
             }
         },
-        Cmd::Map { cmd, missing, all } => match cmd {
+        Cmd::Map {
+            cmd,
+            missing,
+            all,
+            wire,
+        } => match cmd {
             Some(MapCmd::Note { path, sentence }) => cli::map_cmd::note(&path, &sentence, cwd),
             Some(MapCmd::Status) => cli::map_cmd::status(cwd),
             None if missing => cli::map_cmd::missing(all, cwd),
-            None => cli::map_cmd::generate(false, &env, cwd),
+            None => cli::map_cmd::generate(wire, &env, cwd),
         },
         Cmd::Pdf { file, pages, ocr } => cli::pdf_cmd::run(&file, pages.as_deref(), ocr, &env),
     };

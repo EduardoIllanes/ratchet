@@ -20,8 +20,9 @@ reviewer). Everything is enforced by hooks and one small binary, not by prompt t
   handoff, orphaned tasks, and up to five ready to take. One line per prompt after that.
 - **Local PDF extraction** (`ratchet pdf`) through the `liteparse` CLI, with automatic OCR
   retry and output kept out of the terminal.
-- **Agent roles, skills and commands.** Five agent profiles, the `ratchet-tasks` and
-  `ratchet-pdf` skills, the OpenSpec skills with their `/opsx:*` commands, and `/ratchet:init`.
+- **Agent roles, skills and commands.** Seven agent profiles, the `ratchet-tasks` and
+  `ratchet-pdf` skills, the OpenSpec skills with their `/opsx:*` commands, `/ratchet:init` and
+  `/ratchet:map`.
 
 Cost of the hot path: the guardrail hook does 11-13 ms of its own work per tool call (see
 *Latency* at the end).
@@ -251,13 +252,27 @@ is not planned — it stays in `ops`, where it already runs daily (owner decisio
 
 ## Agents and skills
 
+Seven agent profiles in `agents/`: `analyst`, `spec-test-author`, `implementer`, `reviewer`,
+`refactorer`, `researcher`, `mapper` — see `docs/agent-doctrine.md` for how they are meant to be
+combined. Two skills: `ratchet-tasks` (working the board, writing handoffs) and `ratchet-pdf`
+(extracting text from a local PDF). The OpenSpec skills (`openspec-propose`, `-apply-change`,
+`-update-change`, `-sync-specs`, `-archive-change`, `-explore`) and the `/opsx:*` commands are
+included as-is and need the `openspec` CLI installed separately.
 
-Six agent profiles in `agents/`: `analyst`, `spec-test-author`, `implementer`, `reviewer`,
-`refactorer`, `researcher` — see `docs/agent-doctrine.md` for how they are meant to be combined. Two skills:
-`ratchet-tasks` (working the board, writing handoffs) and `ratchet-pdf` (extracting text from a
-local PDF). The OpenSpec skills (`openspec-propose`, `-apply-change`, `-update-change`,
-`-sync-specs`, `-archive-change`, `-explore`) and the `/opsx:*` commands are included as-is
-and need the `openspec` CLI installed separately.
+## Map
+
+`ratchet map` derives `.ratchet/map.md` — the repo's layout, gate commands, and one sentence per
+source file — from `git ls-files`, file headers and manifests, deterministically, with no model
+involved. `/ratchet:map` runs it and offers to wire it into `CLAUDE.md` (`--wire`, run once,
+never automatic); `/ratchet:map --deep` describes header-less files by dispatching the `mapper`
+agent (`haiku`), which only ever records a sentence through `ratchet map note` — it edits no
+file directly. `ratchet map status` prints the map's freshness (`map: current`, `map: N commits
+behind`, or `map: from another branch`); the session-start briefing shows the same line when the
+map is not current, dropped first if the briefing's own 40-line cap is tight. A map never grows
+past 150 lines — over the cap, the deepest directories collapse into one summary line each.
+`.ratchet/map.md` and `.ratchet/map.notes` are local and untracked; `--wire` is what adds
+`.ratchet/` to `.gitignore`, not `ratchet map` on its own. Configure `[map] exclude` and
+`[map] gate` in `ratchet.toml` when the defaults don't fit a repo.
 
 ## Build from source
 
