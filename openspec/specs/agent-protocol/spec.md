@@ -259,7 +259,12 @@ session stopped since the last prompt and the first held task received no handof
 change, no note and no status change after that stop, the hook SHALL add one more line naming the
 task and the stopped subagent. When a subagent started and has no stop since, the hook SHALL add
 one more line naming the task and the running subagent. If the session holds no task, the hook
-SHALL add nothing at all.
+SHALL add nothing at all. "The first held task" — here, on the line's own identifier/status/
+progress, and for which subagent events count as "of" it — is always the one with the lowest task
+identifier among the tasks the session holds in progress: the same task a `subagent.start` or
+`subagent.stop` event is attributed to when it is recorded (sessions spec, "Subagent start and
+stop"), so the task this line names and the task an event was actually recorded against can never
+disagree.
 
 #### Scenario: With a claimed task
 - **WHEN** a session holding a task at 2 of 5 receives a prompt
