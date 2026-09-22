@@ -59,7 +59,14 @@ struct RawRecord {
 struct RawMessage {
     model: Option<String>,
     usage: Option<RawUsage>,
-    content: Option<Vec<Value>>,
+    // T-0014: kept as a bare `Value`, not `Option<Vec<Value>>` -- a real record's `content` is
+    // normally an array of blocks, but a record with valid usage and STRING content used to fail
+    // `RawMessage`'s whole deserialization (a JSON string cannot deserialize into
+    // `Option<Vec<Value>>`), which lost the record's tokens by counting it `skipped` instead of
+    // `partial`. Kept as `Value` so any shape parses; `parse()` below checks `is_array()` itself
+    // and treats a present-but-non-array value as the degenerate case R2 already has a name for:
+    // `partial`, tokens kept.
+    content: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -121,7 +128,13 @@ pub fn parse(bytes: &[u8]) -> ParseResult {
             .and_then(|m| m.model.clone())
             .unwrap_or_default();
         let raw_usage = raw.message.as_ref().and_then(|m| m.usage.as_ref());
-        if raw_usage.is_none() {
+        let raw_content = raw.message.as_ref().and_then(|m| m.content.as_ref());
+        // T-0014: a present, non-array `content` (e.g. a plain string) can't be read for
+        // `tool_use` blocks -- degenerate the same way a missing `usage` already is: counted
+        // `partial`, never `skipped`, and the call's tokens (from `usage`, independent of
+        // `content`) are kept.
+        let content_is_array = raw_content.map(Value::is_array).unwrap_or(true);
+        if raw_usage.is_none() || !content_is_array {
             out.partial += 1;
         }
         let usage = raw_usage
@@ -137,8 +150,7 @@ pub fn parse(bytes: &[u8]) -> ParseResult {
                     .unwrap_or(0),
             })
             .unwrap_or_default();
-        let (tools, tool_use_ids) =
-            extract_tools(raw.message.as_ref().and_then(|m| m.content.as_ref()));
+        let (tools, tool_use_ids) = extract_tools(raw_content.and_then(Value::as_array));
         out.calls.push(Call {
             ts,
             model,
@@ -347,6 +359,26 @@ mod tests {
         assert_eq!(r.calls.len(), 0);
         assert_eq!(r.skipped, 1, "zero understood records adds one, once");
         assert_eq!(r.partial, 0);
+    }
+
+    #[test]
+    fn non_array_content_is_partial_but_keeps_its_tokens() {
+        // T-0014: `RawMessage.content` used to be `Option<Vec<Value>>`, so a record with valid
+        // `message.usage` but string `content` failed to deserialize at all and was counted
+        // `skipped` -- losing its tokens. It now parses fine: `partial` (content couldn't be
+        // read for tool_use blocks) but every token class from `usage` is kept.
+        let line = br#"{"type":"assistant","timestamp":"2026-09-16T12:00:00Z","message":{"model":"m","usage":{"input_tokens":10,"output_tokens":5},"content":"a plain string, not an array"}}"#;
+        let r = parse(line);
+        assert_eq!(r.calls.len(), 1);
+        assert_eq!(r.skipped, 0, "must not be counted as skipped");
+        assert_eq!(
+            r.partial, 1,
+            "non-array content is degenerate, counted partial"
+        );
+        let c = &r.calls[0];
+        assert_eq!(c.usage.input, 10, "tokens are kept, not zeroed");
+        assert_eq!(c.usage.output, 5);
+        assert!(c.tools.is_empty());
     }
 
     #[test]

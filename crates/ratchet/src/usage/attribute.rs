@@ -366,30 +366,50 @@ pub fn totals_by_role_model(calls: &[AttributedCall]) -> BTreeMap<(String, Strin
     out
 }
 
+/// R6's two pieces: `rounds` is unchanged (exactly one `Totals` per entry into `review`, tokens
+/// between consecutive entries, the first counting from the first claim) — its `len()` is what
+/// `rounds N` prints, and stays `review_entries.len()` no matter what `current` resolves to.
+/// `current` (T-0013) is the open fix round's tokens: `Some` only when the caller asked for one
+/// (`rounds_tokens`'s `current_as_of`) AND at least one entry into `review` exists to span from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rounds {
+    pub rounds: Vec<Totals>,
+    pub current: Option<Totals>,
+}
+
 /// R6: tokens between consecutive entries into `review`, the first round counting from
 /// `first_claim`. `review_entries` are the task's `task.status → review` timestamps, in order;
 /// `rounds` (the count Requirement 6 names) is simply `review_entries.len()`. `calls` must
 /// already be filtered to one task (every `AttributedCall` with `task == Some(that_id)`).
+///
+/// `current_as_of`, when `Some(now)`, additionally spans [the last entry into `review`, `now`) —
+/// the fix round still open while the task sits in `review` (T-0013: those tokens used to fall
+/// out of every window above, since `bounds.windows(2)` never produced one past the last review
+/// entry). The caller decides when a "current" window makes sense (in practice: the task's own
+/// status is still `review`); this function only refuses one when there is no last entry to span
+/// from at all, which cannot happen for a task actually sitting in `review` but keeps this
+/// function correct standalone.
 pub fn rounds_tokens(
     calls: &[AttributedCall],
     first_claim: DateTime<Utc>,
     review_entries: &[DateTime<Utc>],
-) -> Vec<Totals> {
+    current_as_of: Option<DateTime<Utc>>,
+) -> Rounds {
+    let sum_between = |start: DateTime<Utc>, end: DateTime<Utc>| {
+        let mut t = Totals::default();
+        for c in calls {
+            if c.ts >= start && c.ts < end {
+                t.add(&c.usage);
+            }
+        }
+        t
+    };
     let mut bounds = vec![first_claim];
     bounds.extend(review_entries.iter().copied());
-    bounds
-        .windows(2)
-        .map(|w| {
-            let (start, end) = (w[0], w[1]);
-            let mut t = Totals::default();
-            for c in calls {
-                if c.ts >= start && c.ts < end {
-                    t.add(&c.usage);
-                }
-            }
-            t
-        })
-        .collect()
+    let rounds = bounds.windows(2).map(|w| sum_between(w[0], w[1])).collect();
+    let current =
+        current_as_of.and_then(|end| review_entries.last().map(|&start| sum_between(start, end)));
+    Rounds { rounds, current }
 }
 
 /// `orchestrator` tokens ÷ all tokens, `0.0` when `buckets` is empty.
@@ -729,12 +749,65 @@ mod tests {
             mk("2026-09-16T12:07:00Z", 70),
         ];
         let review_entries = [at("2026-09-16T12:04:00Z"), at("2026-09-16T12:08:00Z")];
-        let rounds = rounds_tokens(&calls, at("2026-09-16T12:00:00Z"), &review_entries);
-        assert_eq!(rounds.len(), 2);
-        assert_eq!(rounds[0].input, 40);
+        let rounds = rounds_tokens(&calls, at("2026-09-16T12:00:00Z"), &review_entries, None);
+        assert_eq!(rounds.rounds.len(), 2);
+        assert_eq!(rounds.rounds[0].input, 40);
         assert_eq!(
-            rounds[1].input, 140,
+            rounds.rounds[1].input, 140,
             "the two calls between the two review entries"
+        );
+        assert!(rounds.current.is_none(), "no current_as_of was given");
+    }
+
+    #[test]
+    fn rounds_tokens_current_round_spans_from_the_last_entry_to_now() {
+        // T-0013: a task still sitting in `review` after its (only) entry keeps making calls
+        // that used to fall out of every round window. `current_as_of` closes that gap.
+        let mk = |ts: &str, input: u64| AttributedCall {
+            task: Some("T-0001".into()),
+            session: "s-1".into(),
+            role: "orchestrator".into(),
+            model: "m".into(),
+            ts: at(ts),
+            usage: usage(input, 0),
+        };
+        let calls = vec![
+            mk("2026-09-16T12:01:00Z", 40), // before the (only) review entry: round 0
+            mk("2026-09-16T12:06:00Z", 70), // after it, the open fix round
+            mk("2026-09-16T12:07:00Z", 70),
+        ];
+        let review_entries = [at("2026-09-16T12:04:00Z")];
+        let rounds = rounds_tokens(
+            &calls,
+            at("2026-09-16T12:00:00Z"),
+            &review_entries,
+            Some(at("2026-09-16T12:09:00Z")),
+        );
+        assert_eq!(
+            rounds.rounds.len(),
+            1,
+            "the current window must not change what `rounds` counts"
+        );
+        assert_eq!(rounds.rounds[0].input, 40);
+        assert_eq!(
+            rounds.current.map(|t| t.input),
+            Some(140),
+            "the two calls after the only review entry"
+        );
+    }
+
+    #[test]
+    fn rounds_tokens_has_no_current_round_without_any_review_entry() {
+        let calls: Vec<AttributedCall> = Vec::new();
+        let rounds = rounds_tokens(
+            &calls,
+            at("2026-09-16T12:00:00Z"),
+            &[],
+            Some(at("2026-09-16T12:09:00Z")),
+        );
+        assert!(
+            rounds.current.is_none(),
+            "nothing to span from with zero entries into review"
         );
     }
 

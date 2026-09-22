@@ -657,6 +657,61 @@ fn usage__two_review_rounds_and_tokens_per_round() {
     assert!(contains_number(&text, "140"), "{text}"); // 70 + 70, round 2's tokens
 }
 
+#[test]
+fn usage__a_task_still_in_review_shows_a_current_round() {
+    let sb = board("s-16");
+    let id = new_task(&sb, "current round", &[], "s-16", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-16", 2)), 0);
+    let tb = TranscriptBuilder::new();
+    tb.call(
+        &sb.root(),
+        "s-16",
+        &at(3),
+        "claude-sonnet-5",
+        &tokens(40, 0, 0, 4),
+    );
+    assert_eq!(code(&task(&sb, &["status", &id, "review"], "s-16", 4)), 0);
+    // The fix round is still open: the task stays in `review`, no further status change and no
+    // second entry into `review` -- exactly the shape that used to leave these tokens out of
+    // every round window (T-0013).
+    tb.call(
+        &sb.root(),
+        "s-16",
+        &at(5),
+        "claude-sonnet-5",
+        &tokens(70, 0, 0, 7),
+    )
+    .call(
+        &sb.root(),
+        "s-16",
+        &at(6),
+        "claude-sonnet-5",
+        &tokens(70, 0, 0, 7),
+    );
+
+    let out = usage(&sb, &tb, &[&id], &sb.root(), &[("RATCHET_NOW", &at(9))]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("rounds 1"),
+        "one entry into review; the current round must not inflate the count: {text}"
+    );
+    assert!(text.contains("current"), "{text}");
+    assert!(contains_number(&text, "140"), "{text}"); // 70 + 70, the open fix round's tokens
+
+    let json_out = usage(
+        &sb,
+        &tb,
+        &[&id, "--json"],
+        &sb.root(),
+        &[("RATCHET_NOW", &at(9))],
+    );
+    assert_eq!(code(&json_out), 0, "{}", stderr(&json_out));
+    let v: Value = serde_json::from_str(&stdout(&json_out)).unwrap();
+    assert_eq!(v["tasks"][0]["rounds"], 1);
+    assert_eq!(v["tasks"][0]["current"]["input"], 140);
+}
+
 // --- Requirement: Weights add a cost column, and only then ----------------------------------
 
 #[test]
