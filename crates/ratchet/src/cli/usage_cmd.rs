@@ -484,13 +484,16 @@ struct TaskMetrics {
     role_model: BTreeMap<(String, String), Totals>,
     totals: Totals,
     orientation: Totals,
-    rounds_totals: Vec<Totals>,
+    rounds: attribute::Rounds,
     orch_share: f64,
     cache_eff: f64,
     cost: Option<f64>,
 }
 
-fn task_metrics(collected: &Collected, task_id: &str) -> Option<TaskMetrics> {
+/// `now` only feeds the R6 'current' round (Requirement 6, T-0013): a trailing window from the
+/// task's last entry into `review` is computed exactly when the task's own status is still
+/// `review` — the task cannot be in an open fix round otherwise.
+fn task_metrics(collected: &Collected, task_id: &str, now: DateTime<Utc>) -> Option<TaskMetrics> {
     let row = collected.tasks.iter().find(|t| t.id == task_id)?;
     let calls: Vec<AttributedCall> = collected
         .calls
@@ -511,7 +514,9 @@ fn task_metrics(collected: &Collected, task_id: &str) -> Option<TaskMetrics> {
         .map(|so| so.totals)
         .collect();
     let orientation = attribute::average_totals(&orient_sessions);
-    let rounds_totals = attribute::rounds_tokens(&calls, row.first_claim, &row.review_entries);
+    let current_as_of = (row.status == "review").then_some(now);
+    let rounds =
+        attribute::rounds_tokens(&calls, row.first_claim, &row.review_entries, current_as_of);
     let orch_share = attribute::orchestrator_share(&buckets);
     let cache_eff = attribute::cache_efficiency(&totals);
     let cost = attribute::task_cost(&buckets);
@@ -522,7 +527,7 @@ fn task_metrics(collected: &Collected, task_id: &str) -> Option<TaskMetrics> {
         role_model,
         totals,
         orientation,
-        rounds_totals,
+        rounds,
         orch_share,
         cache_eff,
         cost,
@@ -554,13 +559,13 @@ fn trailer(collected: &Collected) -> Option<String> {
 /// The one-task summary Requirement 10's `--note` appends (prefixed with `usage: ` by
 /// `write_note`), on one paragraph — no embedded newlines. Shared with `render_task`'s own
 /// figures (both build from `task_metrics`) so the note and the `<id>` render can never drift.
-pub(crate) fn one_task_summary(collected: &Collected, task_id: &str) -> String {
-    let Some(m) = task_metrics(collected, task_id) else {
+pub(crate) fn one_task_summary(collected: &Collected, task_id: &str, now: DateTime<Utc>) -> String {
+    let Some(m) = task_metrics(collected, task_id, now) else {
         return format!("{task_id}: no usage data");
     };
     let mut parts = vec![
         format!("{} {}", m.id, m.title),
-        format!("rounds {}", m.rounds_totals.len()),
+        format!("rounds {}", m.rounds.rounds.len()),
         tokens_line("tokens", &m.totals),
         tokens_line("orientation", &m.orientation),
     ];
@@ -596,7 +601,7 @@ fn write_note(
     let session_id = sessions::resolve(&conn, session, env, &here, &th, now)
         .ok()
         .flatten();
-    let text = format!("usage: {}", one_task_summary(collected, task_id));
+    let text = format!("usage: {}", one_task_summary(collected, task_id, now));
     tasks::note(
         &mut conn,
         task_id,
@@ -616,7 +621,7 @@ fn render_task(
     json_out: bool,
     now: DateTime<Utc>,
 ) -> i32 {
-    let Some(m) = task_metrics(collected, task_id) else {
+    let Some(m) = task_metrics(collected, task_id, now) else {
         eprintln!("error: task {task_id} does not exist");
         return 1;
     };
@@ -628,15 +633,22 @@ fn render_task(
             .cloned()
             .collect();
         let buckets = attribute::buckets_of(&calls, collected.weights.as_ref());
+        let mut task_json = json!({
+            "id": m.id,
+            "title": m.title,
+            "status": m.status,
+            "rounds": m.rounds.rounds.len(),
+            "orientation": m.orientation,
+            "buckets": buckets,
+        });
+        // T-0013: only present while the task is still in `review` -- absent, not `null`, the
+        // rest of the time (same "no matching weight, no `cost` key" convention `buckets_of`
+        // already uses).
+        if let Some(current) = &m.rounds.current {
+            task_json["current"] = json!(current);
+        }
         let payload = json!({
-            "tasks": [json!({
-                "id": m.id,
-                "title": m.title,
-                "status": m.status,
-                "rounds": m.rounds_totals.len(),
-                "orientation": m.orientation,
-                "buckets": buckets,
-            })],
+            "tasks": [task_json],
             "skipped": collected.skipped,
             "partial": collected.partial,
             "version": collected.max_version,
@@ -652,9 +664,12 @@ fn render_task(
         lines.push(tokens_line(&format!("{role}  {model}"), t));
     }
     lines.push(tokens_line("orientation", &m.orientation));
-    lines.push(format!("rounds {}", m.rounds_totals.len()));
-    for (i, t) in m.rounds_totals.iter().enumerate() {
+    lines.push(format!("rounds {}", m.rounds.rounds.len()));
+    for (i, t) in m.rounds.rounds.iter().enumerate() {
         lines.push(tokens_line(&format!("round {}", i + 1), t));
+    }
+    if let Some(current) = &m.rounds.current {
+        lines.push(tokens_line("current", current));
     }
     lines.push(format!("orch share {:.1}%", m.orch_share * 100.0));
     lines.push(format!("cache eff {:.1}%", m.cache_eff * 100.0));
@@ -954,7 +969,7 @@ mod tests {
             ],
             weights: None,
         };
-        let m = task_metrics(&collected, "T-0001").expect("task present");
+        let m = task_metrics(&collected, "T-0001", ts).expect("task present");
         assert_eq!(
             m.orientation.input, 20,
             "average of 10 and 30 is 20, never their sum 40"
@@ -973,7 +988,8 @@ mod tests {
             orientation: Vec::new(),
             weights: None,
         };
-        assert!(task_metrics(&collected, "T-9999").is_none());
+        let ts = clock::parse("2026-09-16T12:00:00Z").unwrap();
+        assert!(task_metrics(&collected, "T-9999", ts).is_none());
     }
 
     // --- Blocking finding 1: path confinement ---------------------------------------------
