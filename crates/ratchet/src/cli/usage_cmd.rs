@@ -19,7 +19,7 @@ use crate::output;
 use crate::repo::find_repo;
 use crate::services::{events, sessions, tasks};
 use crate::usage::attribute::{
-    self, AttributedCall, Bucket, SessionEvent, SessionEventKind, SubagentEvent, Totals,
+    self, AttributedCall, SessionEvent, SessionEventKind, SubagentEvent, Totals,
 };
 use crate::usage::transcript::{self, Call, Meta};
 
@@ -38,29 +38,26 @@ pub(crate) struct TaskRow {
 /// One session's orientation total and the tasks it ever held — the unit Requirement 4's
 /// "average over the task's sessions" / "average per session" average over.
 pub(crate) struct SessionOrientation {
-    // Kept for Task 5 / future by-session orientation queries; today's renders key off
-    // `held_tasks` only.
-    #[allow(dead_code)]
-    pub session: String,
+    /// The session's start for `--by role`'s "orientation per session" window filter
+    /// (Requirement 9: `--since` sets the window for every `--by` shape): the timestamp of the
+    /// session's own first transcript record when it has one, else the session row's own
+    /// `started_at` for a session with no transcript at all.
+    pub started_at: DateTime<Utc>,
     pub held_tasks: Vec<String>,
     pub totals: Totals,
 }
 
 /// Everything one report is built from, gathered once by `collect`. `calls` is every parsed call
-/// with its task resolved (or not); `buckets` is `calls` grouped by `(session, role, model)`
-/// across the whole scan (weights applied when the machine config has any); `skipped`/`partial`
-/// are the record-level tallies Requirement 2's trailer line names; `notices` is one line per
-/// session whose transcript file is missing; `orientation` is per-session, not per-task, so a
-/// render can average it either way.
+/// with its task resolved (or not); each render recomputes its own `buckets_of` on whichever
+/// slice of `calls` it needs (a `Bucket` carries no task dimension to filter a whole-scan rollup
+/// by, so nothing here keeps one); `skipped`/`partial` are the record-level tallies Requirement
+/// 2's trailer line names, PLUS one for every session whose transcript or subagent path was
+/// refused as unconfined (never an error); `notices` is one line per session whose transcript
+/// file is missing or refused; `orientation` is per-session, not per-task, so a render can
+/// average it either way.
 pub(crate) struct Collected {
     pub tasks: Vec<TaskRow>,
     pub calls: Vec<AttributedCall>,
-    // The whole window's (session, role, model) buckets. Per-task renders recompute
-    // `buckets_of` on task-filtered calls instead (a `Bucket` carries no task dimension to
-    // filter this one by), so this whole-window rollup is kept for Task 5 / a future
-    // whole-window `--json` consumer, not read by anything in this task yet.
-    #[allow(dead_code)]
-    pub buckets: Vec<Bucket>,
     pub skipped: u64,
     pub partial: u64,
     pub max_version: Option<String>,
@@ -142,23 +139,63 @@ fn agent_id_from(path: &Path) -> Option<String> {
     stem.strip_prefix("agent-").map(str::to_string)
 }
 
-/// Coarse numeric-dot version compare, same rule as `transcript::parse`'s own (private) one —
-/// duplicated here in the few lines it takes rather than exporting a seam Task 2 never needed.
+/// Bumps `current` to `candidate` when it names a newer version, using `transcript::newer`'s own
+/// numeric-dot compare (fix round: this used to carry a second copy of that compare).
 fn bump_version(current: &mut Option<String>, candidate: &Option<String>) {
     let Some(v) = candidate else { return };
-    let newer = match current.as_ref() {
-        None => true,
-        Some(cur) => version_key(v) > version_key(cur),
-    };
-    if newer {
+    if transcript::newer(current, v) {
         *current = Some(v.clone());
     }
 }
 
-fn version_key(v: &str) -> Vec<u64> {
-    v.split('.')
-        .map(|p| p.parse::<u64>().unwrap_or(0))
-        .collect()
+/// Outcome of confining one transcript/subagent path to the canonicalized projects dir, checked
+/// right before that path is ever read (Blocking finding 1: a session id of
+/// `../../outside-secret` used to walk `ratchet usage --by session` two directories above the
+/// projects dir and fold its tokens in).
+enum Confinement {
+    /// Nothing at all is on disk at this path — the ordinary "this session/agent never wrote
+    /// here" case (Requirement 1's "no transcript" row), not a refusal.
+    Missing,
+    /// Something is on disk here, but either it is not the confinement's own file/directory type
+    /// (a symlink planted at the path itself, `symlink_metadata`'s own type, is refused
+    /// unconditionally, wherever it points) or its parent does not canonicalize to somewhere
+    /// inside the projects dir (including a canonicalize failure). Never read.
+    Refused,
+    /// Confirmed present, of the expected type, and confined. Safe to read.
+    Present,
+}
+
+/// Two independent layers against a crafted or planted path, mirroring
+/// `hooks::dispatch::subagent_meta`'s own two-layer defense: `session_id` (and, via the
+/// filenames built under it, `agent_id`) is already run through `hooks::dispatch::sanitize_id`
+/// before `path` is ever built (`transcript::transcript_path`/`subagents_dir`), which keeps a
+/// crafted id from introducing a `..` segment or an absolute path of its own; this function is
+/// the second, independent layer, checked right before the read. `symlink_metadata` (which does
+/// NOT follow a symlink) on `path` itself must show the expected type -- `want_dir` for the
+/// subagents directory, a plain file for everything else -- so a symlink planted at a
+/// transcript's own path is refused wherever it points, never followed; and `path`'s parent must
+/// canonicalize to somewhere inside `projects_canon` (a canonicalize failure, including a parent
+/// that does not exist, refuses the path -- it never falls back to reading the raw one).
+fn confine(path: &Path, projects_canon: &Path, want_dir: bool) -> Confinement {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return Confinement::Missing,
+    };
+    let kind_ok = if want_dir {
+        meta.file_type().is_dir()
+    } else {
+        meta.file_type().is_file()
+    };
+    if !kind_ok {
+        return Confinement::Refused;
+    }
+    let Some(parent) = path.parent() else {
+        return Confinement::Refused;
+    };
+    match parent.canonicalize() {
+        Ok(canon) if canon.starts_with(projects_canon) => Confinement::Present,
+        _ => Confinement::Refused,
+    }
 }
 
 /// The collection pass: resolve the projects dir, open the database read-only, walk every
@@ -171,6 +208,11 @@ pub(crate) fn collect(
     all_repos: bool,
 ) -> Result<Collected, String> {
     let projects = projects_dir(env)?;
+    // The confinement anchor every transcript/subagent path is checked against below (`confine`).
+    // `projects_dir` already required `projects` to be a directory, so this should always
+    // succeed; a failure here is as good a reason as any to refuse the whole scan rather than
+    // silently confining against something wrong.
+    let projects_canon = projects.canonicalize().map_err(|e| e.to_string())?;
     let home = config::ratchet_home(env);
     let conn = db::open_ready(&home).map_err(|e| e.to_string())?;
     let here = cwd
@@ -235,18 +277,32 @@ pub(crate) fn collect(
         // A missing main transcript is R1's "no transcript" row, not an error, and — critically —
         // does not skip this session's subagent transcripts below: a subagent scenario writes no
         // parent transcript at all (fix round: three subagent scenarios were losing their calls
-        // entirely because an early `continue` here never reached the subagent scan).
+        // entirely because an early `continue` here never reached the subagent scan). A REFUSED
+        // path (present on disk but not confined to the projects dir — Blocking finding 1) is
+        // different from missing: it counts once in `skipped`, with its own "refused path"
+        // notice, and is never read.
         let path = transcript::transcript_path(&projects, &s.cwd, &s.id);
-        let main_calls: Vec<Call> = match std::fs::read(&path) {
-            Ok(bytes) => {
-                let parsed = transcript::parse(&bytes);
-                skipped += parsed.skipped;
-                partial += parsed.partial;
-                bump_version(&mut max_version, &parsed.max_version);
-                parsed.calls
-            }
-            Err(_) => {
+        let main_calls: Vec<Call> = match confine(&path, &projects_canon, false) {
+            Confinement::Present => match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let parsed = transcript::parse(&bytes);
+                    skipped += parsed.skipped;
+                    partial += parsed.partial;
+                    bump_version(&mut max_version, &parsed.max_version);
+                    parsed.calls
+                }
+                Err(_) => {
+                    notices.push(format!("session {}: no transcript", s.id));
+                    Vec::new()
+                }
+            },
+            Confinement::Missing => {
                 notices.push(format!("session {}: no transcript", s.id));
+                Vec::new()
+            }
+            Confinement::Refused => {
+                skipped += 1;
+                notices.push(format!("session {}: refused path", s.id));
                 Vec::new()
             }
         };
@@ -254,8 +310,12 @@ pub(crate) fn collect(
         let mut sorted_calls: Vec<&Call> = main_calls.iter().collect();
         sorted_calls.sort_by_key(|c| c.ts);
         let orient_totals = attribute::orientation(&sorted_calls, first_claim);
+        // "The session's start (or first record)" (Blocking finding 2): the first record when
+        // there is one, else the session row's own `started_at` for a session with no transcript
+        // at all -- `--by role`'s "orientation per session" filters on this, below.
+        let session_start = sorted_calls.first().map(|c| c.ts).unwrap_or(s.started_at);
         orientation.push(SessionOrientation {
-            session: s.id.clone(),
+            started_at: session_start,
             held_tasks,
             totals: orient_totals,
         });
@@ -282,66 +342,92 @@ pub(crate) fn collect(
         }
 
         let sub_dir = transcript::subagents_dir(&projects, &s.cwd, &s.id);
-        if let Ok(entries) = std::fs::read_dir(&sub_dir) {
-            let mut files: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.extension().and_then(|x| x.to_str()) == Some("jsonl")
-                        && p.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| n.starts_with("agent-"))
-                            .unwrap_or(false)
-                })
-                .collect();
-            files.sort();
-            for jf in files {
-                let Some(agent_id) = agent_id_from(&jf) else {
-                    continue;
-                };
-                let bytes = match std::fs::read(&jf) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                let sub_parsed = transcript::parse(&bytes);
-                skipped += sub_parsed.skipped;
-                partial += sub_parsed.partial;
-                bump_version(&mut max_version, &sub_parsed.max_version);
+        let sub_dir_confined = match confine(&sub_dir, &projects_canon, true) {
+            Confinement::Present => true,
+            Confinement::Missing => false,
+            Confinement::Refused => {
+                skipped += 1;
+                notices.push(format!("session {}: refused path", s.id));
+                false
+            }
+        };
+        if sub_dir_confined {
+            if let Ok(entries) = std::fs::read_dir(&sub_dir) {
+                let mut files: Vec<PathBuf> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.extension().and_then(|x| x.to_str()) == Some("jsonl")
+                            && p.file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|n| n.starts_with("agent-"))
+                                .unwrap_or(false)
+                    })
+                    .collect();
+                files.sort();
+                for jf in files {
+                    let Some(agent_id) = agent_id_from(&jf) else {
+                        continue;
+                    };
+                    let bytes = match confine(&jf, &projects_canon, false) {
+                        Confinement::Present => match std::fs::read(&jf) {
+                            Ok(b) => b,
+                            Err(_) => continue,
+                        },
+                        Confinement::Missing => continue,
+                        Confinement::Refused => {
+                            skipped += 1;
+                            notices
+                                .push(format!("session {} agent {}: refused path", s.id, agent_id));
+                            continue;
+                        }
+                    };
+                    let sub_parsed = transcript::parse(&bytes);
+                    skipped += sub_parsed.skipped;
+                    partial += sub_parsed.partial;
+                    bump_version(&mut max_version, &sub_parsed.max_version);
 
-                let meta_path = jf.with_file_name(format!("agent-{agent_id}.meta.json"));
-                let meta: Option<Meta> = std::fs::read(&meta_path)
-                    .ok()
-                    .and_then(|b| transcript::read_meta(&b));
+                    // Meta is best-effort even when present but unconfined (D-usage-subagents'
+                    // third fallback already tolerates a missing meta file); it just never folds
+                    // in a refused one.
+                    let meta_path = jf.with_file_name(format!("agent-{agent_id}.meta.json"));
+                    let meta: Option<Meta> = match confine(&meta_path, &projects_canon, false) {
+                        Confinement::Present => std::fs::read(&meta_path)
+                            .ok()
+                            .and_then(|b| transcript::read_meta(&b)),
+                        Confinement::Missing | Confinement::Refused => None,
+                    };
 
-                let event = subagent_event_of(&raw_events, &agent_id);
-                let description = event
-                    .as_ref()
-                    .and_then(|e| e.description.clone())
-                    .filter(|d| !d.is_empty())
-                    .or_else(|| meta.as_ref().and_then(|m| m.description.clone()));
+                    let event = subagent_event_of(&raw_events, &agent_id);
+                    let description = event
+                        .as_ref()
+                        .and_then(|e| e.description.clone())
+                        .filter(|d| !d.is_empty())
+                        .or_else(|| meta.as_ref().and_then(|m| m.description.clone()));
 
-                let first_ts = sub_parsed.calls.iter().map(|c| c.ts).min();
-                let (task, role) = attribute::subagent_task_and_role(
-                    event.as_ref(),
-                    meta.as_ref(),
-                    &holds,
-                    &parent_agent_calls,
-                    first_ts,
-                );
-                if let Some(t) = &task {
-                    task_ids.insert(t.clone());
-                }
-                let display = attribute::display_role(&role, description.as_deref());
+                    let first_ts = sub_parsed.calls.iter().map(|c| c.ts).min();
+                    let (task, role) = attribute::subagent_task_and_role(
+                        event.as_ref(),
+                        meta.as_ref(),
+                        &holds,
+                        &parent_agent_calls,
+                        first_ts,
+                    );
+                    if let Some(t) = &task {
+                        task_ids.insert(t.clone());
+                    }
+                    let display = attribute::display_role(&role, description.as_deref());
 
-                for c in &sub_parsed.calls {
-                    all_calls.push(AttributedCall {
-                        task: task.clone(),
-                        session: s.id.clone(),
-                        role: display.clone(),
-                        model: c.model.clone(),
-                        ts: c.ts,
-                        usage: c.usage,
-                    });
+                    for c in &sub_parsed.calls {
+                        all_calls.push(AttributedCall {
+                            task: task.clone(),
+                            session: s.id.clone(),
+                            role: display.clone(),
+                            model: c.model.clone(),
+                            ts: c.ts,
+                            usage: c.usage,
+                        });
+                    }
                 }
             }
         }
@@ -377,12 +463,9 @@ pub(crate) fn collect(
         });
     }
 
-    let buckets = attribute::buckets_of(&all_calls, weights.as_ref());
-
     Ok(Collected {
         tasks: tasks_out,
         calls: all_calls,
-        buckets,
         skipped,
         partial,
         max_version,
@@ -669,6 +752,34 @@ fn render_listing(
     0
 }
 
+/// Requirement 9: `--since` sets the window for every `--by` shape, including a call the scan
+/// never attributed to a task ("unassigned"). A call with a task is in the window exactly when
+/// that task is; an unassigned call has no task to check, so it is in the window by its OWN
+/// timestamp instead (fix round, Blocking finding 2: `.unwrap_or(true)` here used to let every
+/// unassigned call through regardless of `--since`).
+fn call_in_by_window(
+    c: &AttributedCall,
+    in_window: &BTreeSet<&str>,
+    cutoff: DateTime<Utc>,
+) -> bool {
+    match c.task.as_deref() {
+        Some(t) => in_window.contains(t),
+        None => c.ts >= cutoff,
+    }
+}
+
+/// Requirement 9 again, for `--by role`'s "orientation per session" line: only the sessions
+/// whose own start (or first record — see `SessionOrientation::started_at`) falls on or after
+/// `cutoff` average in (fix round, Blocking finding 2: this used to average every session
+/// ratchet has ever recorded, regardless of `--since`).
+fn orientation_since(orientation: &[SessionOrientation], cutoff: DateTime<Utc>) -> Vec<Totals> {
+    orientation
+        .iter()
+        .filter(|so| so.started_at >= cutoff)
+        .map(|so| so.totals)
+        .collect()
+}
+
 fn render_by(
     home: &Path,
     collected: &Collected,
@@ -686,12 +797,7 @@ fn render_by(
     let owned_calls: Vec<AttributedCall> = collected
         .calls
         .iter()
-        .filter(|c| {
-            c.task
-                .as_deref()
-                .map(|t| in_window.contains(t))
-                .unwrap_or(true)
-        })
+        .filter(|c| call_in_by_window(c, &in_window, cutoff))
         .cloned()
         .collect();
     let grouped = match by {
@@ -730,7 +836,7 @@ fn render_by(
             "review rounds per task {:.1}",
             total_rounds as f64 / task_count as f64
         ));
-        let sess_totals: Vec<Totals> = collected.orientation.iter().map(|s| s.totals).collect();
+        let sess_totals = orientation_since(&collected.orientation, cutoff);
         let avg = attribute::average_totals(&sess_totals);
         lines.push(tokens_line("orientation per session", &avg));
     }
@@ -826,22 +932,22 @@ mod tests {
     /// (20) must appear, not the sum (40).
     #[test]
     fn orientation_for_a_task_averages_across_its_sessions_not_sums() {
+        let ts = clock::parse("2026-09-16T12:00:00Z").unwrap();
         let collected = Collected {
             tasks: vec![empty_task_row("T-0001")],
             calls: Vec::new(),
-            buckets: Vec::new(),
             skipped: 0,
             partial: 0,
             max_version: None,
             notices: Vec::new(),
             orientation: vec![
                 SessionOrientation {
-                    session: "s-1".to_string(),
+                    started_at: ts,
                     held_tasks: vec!["T-0001".to_string()],
                     totals: totals(10),
                 },
                 SessionOrientation {
-                    session: "s-2".to_string(),
+                    started_at: ts,
                     held_tasks: vec!["T-0001".to_string()],
                     totals: totals(30),
                 },
@@ -860,7 +966,6 @@ mod tests {
         let collected = Collected {
             tasks: Vec::new(),
             calls: Vec::new(),
-            buckets: Vec::new(),
             skipped: 0,
             partial: 0,
             max_version: None,
@@ -869,5 +974,103 @@ mod tests {
             weights: None,
         };
         assert!(task_metrics(&collected, "T-9999").is_none());
+    }
+
+    // --- Blocking finding 1: path confinement ---------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn confine_refuses_a_symlinked_transcript_pointing_outside_the_projects_dir() {
+        use std::os::unix::fs::symlink;
+
+        let projects = tempfile::TempDir::new().unwrap();
+        let projects_canon = projects.path().canonicalize().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let secret = outside.path().join("secret.jsonl");
+        std::fs::write(&secret, "should never be read").unwrap();
+
+        let slug_dir = projects.path().join("-repo");
+        std::fs::create_dir_all(&slug_dir).unwrap();
+        let planted = slug_dir.join("s-1.jsonl");
+        symlink(&secret, &planted).unwrap();
+
+        assert!(
+            matches!(
+                confine(&planted, &projects_canon, false),
+                Confinement::Refused
+            ),
+            "a symlinked transcript pointing outside the projects dir must be refused, not read"
+        );
+
+        // Contrast: an ordinary file at the same kind of path is confined and read.
+        let real = slug_dir.join("s-2.jsonl");
+        std::fs::write(&real, "{}").unwrap();
+        assert!(matches!(
+            confine(&real, &projects_canon, false),
+            Confinement::Present
+        ));
+
+        // Contrast: nothing on disk at all is "missing", not "refused".
+        let never_written = slug_dir.join("s-3.jsonl");
+        assert!(matches!(
+            confine(&never_written, &projects_canon, false),
+            Confinement::Missing
+        ));
+    }
+
+    // --- Blocking finding 2: --since applies to unassigned calls and orientation per session -
+
+    fn call_at(task: Option<&str>, ts: DateTime<Utc>) -> AttributedCall {
+        AttributedCall {
+            task: task.map(str::to_string),
+            session: "s-1".to_string(),
+            role: "orchestrator".to_string(),
+            model: "m".to_string(),
+            ts,
+            usage: transcript::Usage::default(),
+        }
+    }
+
+    #[test]
+    fn an_unassigned_call_is_in_the_by_window_only_by_its_own_timestamp() {
+        let cutoff = clock::parse("2026-09-16T00:00:00Z").unwrap();
+        let old = clock::parse("2026-09-01T00:00:00Z").unwrap();
+        let recent = clock::parse("2026-09-20T00:00:00Z").unwrap();
+        let in_window: BTreeSet<&str> = BTreeSet::new();
+
+        assert!(
+            !call_in_by_window(&call_at(None, old), &in_window, cutoff),
+            "an unassigned call before --since must NOT leak into a --by report"
+        );
+        assert!(
+            call_in_by_window(&call_at(None, recent), &in_window, cutoff),
+            "an unassigned call on/after --since belongs in the window"
+        );
+    }
+
+    #[test]
+    fn orientation_per_session_averages_only_sessions_since_the_cutoff() {
+        let cutoff = clock::parse("2026-09-16T00:00:00Z").unwrap();
+        let old = clock::parse("2026-09-01T00:00:00Z").unwrap();
+        let recent = clock::parse("2026-09-20T00:00:00Z").unwrap();
+        let orientation = vec![
+            SessionOrientation {
+                started_at: old,
+                held_tasks: Vec::new(),
+                totals: totals(100), // must be excluded: started before --since
+            },
+            SessionOrientation {
+                started_at: recent,
+                held_tasks: Vec::new(),
+                totals: totals(20),
+            },
+        ];
+        let sess_totals = orientation_since(&orientation, cutoff);
+        assert_eq!(sess_totals.len(), 1, "the old session must not be counted");
+        let avg = attribute::average_totals(&sess_totals);
+        assert_eq!(
+            avg.input, 20,
+            "average of only the recent session, not both"
+        );
     }
 }

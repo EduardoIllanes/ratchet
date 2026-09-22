@@ -35,16 +35,6 @@ impl Totals {
         self.thinking += u.thinking;
     }
 
-    // Consumed by cli::usage_cmd (Task 4).
-    #[allow(dead_code)]
-    pub fn merge(&mut self, other: &Totals) {
-        self.input += other.input;
-        self.cache_write += other.cache_write;
-        self.cache_read += other.cache_read;
-        self.output += other.output;
-        self.thinking += other.thinking;
-    }
-
     /// Every class summed; `thinking` excluded on purpose (already inside `output`).
     pub fn all(&self) -> u64 {
         self.input + self.cache_write + self.cache_read + self.output

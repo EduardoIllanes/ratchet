@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::clock;
+use crate::hooks::dispatch::sanitize_id;
 
 /// The four token classes plus thinking, all defaulting to zero for a record that lacks them.
 // Consumed by usage::attribute (Task 3) and cli::usage_cmd (Task 4).
@@ -175,14 +176,16 @@ fn extract_tools(content: Option<&Vec<Value>>) -> (Vec<String>, Vec<String>) {
 /// compares as 0. Good enough to pick "the highest version seen" among the small, well-formed
 /// version strings Claude Code writes (D-usage-tolerant only needs "highest", not a full semver
 /// implementation).
-fn newer(current: &Option<String>, candidate: &str) -> bool {
+// `pub(crate)`: `cli::usage_cmd`'s own `bump_version` calls this instead of carrying a second
+// copy of the same numeric-dot compare (fix round).
+pub(crate) fn newer(current: &Option<String>, candidate: &str) -> bool {
     match current {
         None => true,
         Some(cur) => version_key(candidate) > version_key(cur),
     }
 }
 
-fn version_key(v: &str) -> Vec<u64> {
+pub(crate) fn version_key(v: &str) -> Vec<u64> {
     v.split('.')
         .map(|p| p.parse::<u64>().unwrap_or(0))
         .collect()
@@ -200,20 +203,26 @@ pub fn slug_for(cwd: &str) -> String {
         .collect()
 }
 
-/// `<projects>/<slug>/<session id>.jsonl`.
+/// `<projects>/<slug>/<session id>.jsonl`. `session_id` comes from the `sessions` table, which
+/// hook input populates and is therefore untrusted the same way a hook's own `session_id` is
+/// (fix round: a session id of `../../outside-secret` used to walk `ratchet usage` two
+/// directories above the projects dir) -- run through the same `[A-Za-z0-9_-]` rule
+/// `hooks::dispatch::sanitize_id` applies to hook-supplied identifiers before it ever touches a
+/// path, so no crafted id can introduce a path separator or a `..` segment here either.
 // Consumed by cli::usage_cmd (Task 4).
 pub fn transcript_path(projects_dir: &Path, cwd: &str, session_id: &str) -> PathBuf {
     projects_dir
         .join(slug_for(cwd))
-        .join(format!("{session_id}.jsonl"))
+        .join(format!("{}.jsonl", sanitize_id(session_id)))
 }
 
-/// `<projects>/<slug>/<session id>/subagents/`.
+/// `<projects>/<slug>/<session id>/subagents/`. Same `session_id` sanitization as
+/// `transcript_path`, and for the same reason.
 // Consumed by cli::usage_cmd (Task 4).
 pub fn subagents_dir(projects_dir: &Path, cwd: &str, session_id: &str) -> PathBuf {
     projects_dir
         .join(slug_for(cwd))
-        .join(session_id)
+        .join(sanitize_id(session_id))
         .join("subagents")
 }
 
@@ -281,6 +290,30 @@ mod tests {
         assert_eq!(
             subagents_dir(root, "/repo", "s-1"),
             root.join("-repo").join("s-1").join("subagents")
+        );
+    }
+
+    #[test]
+    fn a_traversal_session_id_yields_a_path_inside_the_projects_dir() {
+        // Blocking finding, live repro: a session with id `../../outside-secret` made
+        // `ratchet usage --by session` read a file two directories above the projects dir and
+        // fold its tokens in. `session_id` is sanitized the same way a hook-supplied identifier
+        // is (`hooks::dispatch::sanitize_id`), so every `.`/`/` in it becomes `_` and the joined
+        // path can never leave `root.join("-repo")`.
+        let root = Path::new("/home/e/.claude/projects");
+        let evil = "../../outside-secret";
+
+        let t = transcript_path(root, "/repo", evil);
+        assert!(t.starts_with(root.join("-repo")), "{}", t.display());
+        assert_eq!(t, root.join("-repo").join("______outside-secret.jsonl"));
+
+        let d = subagents_dir(root, "/repo", evil);
+        assert!(d.starts_with(root.join("-repo")), "{}", d.display());
+        assert_eq!(
+            d,
+            root.join("-repo")
+                .join("______outside-secret")
+                .join("subagents")
         );
     }
 
