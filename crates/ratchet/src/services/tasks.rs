@@ -623,7 +623,12 @@ fn require_done_evidence(
 /// `done`'s other piece of evidence: a review verdict from a session that did not do the work.
 /// Reads the most recent `review.verdict` event and refuses unless it is `approve` from a session
 /// that is neither the current holder nor any session that ever claimed the task or checked off
-/// one of its items — a self-review by any name.
+/// one of its items — a self-review by any name — and that ratchet itself registered (a row in
+/// the sessions table, written by the session-start hook). A verdict is always recorded
+/// regardless of registration (see `review` above); only the done gate cares whether the
+/// recording session is one ratchet has seen. This keeps a session from minting an arbitrary
+/// `--session` to approve its own work: registration happens outside the reviewer's control, at
+/// session start, not on the command line.
 // Called only from `transition` above.
 #[allow(dead_code)]
 fn require_independent_review(conn: &Connection, task: &Task) -> Result<(), ServiceError> {
@@ -638,6 +643,18 @@ fn require_independent_review(conn: &Connection, task: &Task) -> Result<(), Serv
         ServiceError::Invalid(format!(
             "{}: no independent review verdict — have the reviewer run: ratchet task review {} approve \"...\" (from a session other than {who})",
             task.id, task.id
+        ))
+    };
+    // The verdict's session passed the "didn't work on it" check, but ratchet never registered
+    // it (no session-start row) — recorded, but not enough to satisfy the gate.
+    let not_registered = |who: &str| {
+        ServiceError::Invalid(format!(
+            "{}: the approve from {} is not registered — ratchet only counts an approve from a \
+             session it registered itself; record the review from a Claude Code session opened \
+             in this repo, or the owner can run: ratchet task status {} done --unreviewed",
+            task.id,
+            short_session(who),
+            task.id
         ))
     };
     let Some(ev) = latest_review_verdict(conn, &task.id)? else {
@@ -663,6 +680,11 @@ fn require_independent_review(conn: &Connection, task: &Task) -> Result<(), Serv
     };
     if disqualified {
         return Err(missing(reviewer.or(task.claimed_by.as_deref())));
+    }
+    // `disqualified` is false only when `reviewer` matched `Some(r)` above.
+    let reviewer_id = reviewer.expect("non-disqualified reviewer always has a session id");
+    if sessions::get(conn, reviewer_id)?.is_none() {
+        return Err(not_registered(reviewer_id));
     }
     Ok(())
 }
@@ -2400,6 +2422,24 @@ mod tests {
     fn done_is_allowed_after_an_approve_from_another_session() {
         let ts = at("2026-09-16T12:01:00Z");
         let (mut c, id) = reviewable(ts);
+        // The reviewer session must be one ratchet itself registered (T-0016) — a session that
+        // never went through the session-start hook does not satisfy the gate, even with an
+        // otherwise-qualifying approve.
+        sessions::upsert_start(
+            &mut c,
+            StartInput {
+                session_id: "s-reviewer",
+                repo: "demo",
+                repo_root: "root",
+                cwd: "root",
+                worktree: None,
+                branch: None,
+                mode: SessionMode::Interactive,
+                launched_by: LaunchedBy::User,
+            },
+            ts,
+        )
+        .unwrap();
         review(
             &mut c,
             &id,
@@ -2422,6 +2462,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(done.status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn done_is_refused_when_the_approve_came_from_an_unregistered_session() {
+        // s-ghost never went through the session-start hook — a hand-typed --session can still
+        // record a verdict (recording is unconditional), but it must not satisfy the done gate:
+        // otherwise a session could mint an arbitrary --session and approve its own work.
+        let ts = at("2026-09-16T12:01:00Z");
+        let (mut c, id) = reviewable(ts);
+        review(
+            &mut c,
+            &id,
+            "approve",
+            "looks fine to a stranger",
+            Source::Cli,
+            Some("s-ghost"),
+            ts,
+        )
+        .unwrap();
+        let err = transition(
+            &mut c,
+            &id,
+            TaskStatus::Done,
+            Source::Cli,
+            Some("s-impl"),
+            None,
+            false,
+            ts,
+        )
+        .unwrap_err();
+        let err = err.to_string().to_lowercase();
+        assert!(err.contains("not registered"), "{err}");
+        assert!(err.contains("claude code"), "{err}");
+        assert!(err.contains("--unreviewed"), "{err}");
+        assert_eq!(get(&c, &id).unwrap().status, TaskStatus::InProgress);
     }
 
     #[test]

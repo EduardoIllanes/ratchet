@@ -29,7 +29,10 @@ through the `ratchet` CLI (the plugin puts it on your path; `ratchet --help` lis
 6. **Close in one call**: `ratchet task handoff T-0042 "…" --status review` records the handoff
    and moves the task in the same call (or `--status done` when the checklist is complete;
    without a checklist, add `--why "…"`). `done` refuses without an independent review verdict —
-   a different session must first run `ratchet task review T-0042 approve "…"`; the owner alone
+   a different session that ratchet itself registered must first run `ratchet task review T-0042
+   approve "…"`. A hand-typed `--session <id>` that never opened as a real Claude Code session in
+   this repo can still record the verdict, but it will not satisfy the gate — that is what stops
+   a session from minting an arbitrary `--session` to approve its own work. The owner alone
    bypasses this with `--unreviewed`. A refused transition still leaves the handoff recorded, so
    this is always safe to try.
 
