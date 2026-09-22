@@ -192,11 +192,17 @@ fn version_key(v: &str) -> Vec<u64> {
         .collect()
 }
 
-/// `<slug>` per R1: the session's recorded `cwd` with every path separator replaced by `-`.
+/// `<slug>` per R1: the session's recorded `cwd` with every character that is not an ASCII
+/// letter or digit replaced by `-` -- matching how Claude Code itself names a project directory
+/// (verified against real `~/.claude/projects` directories: e.g. a `cwd` of
+/// `/Users/e/.claude-mem/observer-sessions` becomes `-Users-e--claude-mem-observer-sessions`,
+/// the dot included).
 // Consumed by cli::usage_cmd (Task 4).
 #[allow(dead_code)]
 pub fn slug_for(cwd: &str) -> String {
-    cwd.replace(['/', '\\'], "-")
+    cwd.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// `<projects>/<slug>/<session id>.jsonl`.
@@ -263,13 +269,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slug_replaces_every_separator() {
+    fn slug_replaces_every_non_alphanumeric_character() {
+        // R1 (fix round 1): matches how Claude Code itself names a project directory -- every
+        // character that is not an ASCII letter or digit becomes `-`, not only path separators.
+        // A dot in a directory name (e.g. `.worktrees`, `my.repo`) becomes `-` too, verified
+        // against real `~/.claude/projects` entries on this machine.
         assert_eq!(slug_for("/Users/e/repo"), "-Users-e-repo");
-        // R1: "every path separator replaced by `-`" -- `:` is not a path separator, so it is
-        // left alone. (Fixed from the brief's verbatim expectation, "-C--repos-demo", which does
-        // not match what `/` and `\` alone, replaced with `-`, produce for this input: 13
-        // characters in, 13 out, not 14.)
-        assert_eq!(slug_for(r"C:\repos\demo"), "C:-repos-demo");
+        assert_eq!(slug_for("/Users/x/my.repo"), "-Users-x-my-repo");
+        assert_eq!(slug_for("/r/.worktrees/t-0001"), "-r--worktrees-t-0001");
+        assert_eq!(slug_for(r"C:\repos\demo"), "C--repos-demo");
     }
 
     #[test]
