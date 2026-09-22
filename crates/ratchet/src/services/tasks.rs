@@ -154,6 +154,16 @@ pub fn claimed_ids(conn: &Connection, session_id: &str) -> Result<Vec<String>, S
     Ok(out)
 }
 
+/// The one definition of "the first held task": the lowest identifier among the tasks in
+/// progress this session holds, or `None` when it holds none. `hooks::dispatch::subagent_event`
+/// (write time, to pick the task a `subagent.start`/`subagent.stop` event is attributed to) and
+/// `hooks::briefing::prompt_line` (read time, to pick the task the prompt reminder names) both
+/// call this so the two can never disagree — see the agent-protocol spec's "Task reminder on
+/// every prompt" requirement.
+pub fn first_held_id(conn: &Connection, session_id: &str) -> Result<Option<String>, ServiceError> {
+    Ok(claimed_ids(conn, session_id)?.into_iter().next())
+}
+
 /// What a listing asks for. `repo_root` is the scoping key (G1-R1); `repo` filters on the display
 /// name and exists for "everything called `web` on this machine".
 // Consumed by cli::task_cmd (Task 8, `task list`) and hooks (Task 9's briefing).

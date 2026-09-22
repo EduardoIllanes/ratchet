@@ -961,6 +961,60 @@ fn agent_protocol__a_running_subagent_adds_a_line() {
     );
 }
 
+/// A task at a given priority, for the two-held-tasks reminder scenario.
+fn new_task_p(sb: &Sandbox, title: &str, session_id: &str, minutes: i64, priority: i64) -> String {
+    let p = priority.to_string();
+    let out = task(sb, &["new", title, "--priority", &p], session_id, minutes);
+    assert_eq!(code(&out), 0, "task new failed: {}", stderr(&out));
+    stdout(&out)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn agent_protocol__two_held_tasks_reminder_names_the_task_the_event_was_recorded_on() {
+    let session = "s-rem-multi";
+    let sb = board(session);
+    // Created (and so identified) first, but the LESS urgent of the two: a session picking "the
+    // first held task" by priority would land on `urgent_id` instead. `subagent_event` (write
+    // time) and `prompt_line` (read time) must agree on identifier order regardless.
+    let calm_id = new_task_p(&sb, "less urgent, lower id", session, 1, 4);
+    let urgent_id = new_task_p(&sb, "more urgent, higher id", session, 2, 1);
+    assert!(calm_id < urgent_id, "{calm_id} vs {urgent_id}");
+    assert_eq!(code(&task(&sb, &["claim", &calm_id], session, 3)), 0);
+    assert_eq!(code(&task(&sb, &["claim", &urgent_id], session, 4)), 0);
+    let agent = "e1f2a3b4c5d60718";
+    let stopped = record_stop(&sb, session, agent, 5);
+    assert_eq!(code(&stopped), 0, "{}", stderr(&stopped));
+    // Recorded against the lower-id task, matching `tasks::first_held_id`'s ordering.
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE task_id = ?1 AND kind = 'subagent.stop'",
+            &[calm_id.as_str()]
+        ),
+        1
+    );
+    let out = prompt_at(&sb, session, 6);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let printed = lines(&out);
+    assert!(printed[0].contains(&calm_id), "{printed:?}");
+    assert!(
+        printed.iter().any(|l| l
+            == &format!(
+                "[ratchet] {calm_id} · subagent {} stopped with no record",
+                &agent[..8]
+            )),
+        "{printed:?}"
+    );
+    assert!(
+        !printed.iter().any(|l| l.contains(&urgent_id)),
+        "the line must name the task the event was recorded on, not the more urgent one: {printed:?}"
+    );
+}
+
 #[test]
 fn agent_protocol__subagent_events_appear_in_the_detail_view() {
     let session = "s-rem-shown";

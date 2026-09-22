@@ -139,9 +139,13 @@ fn snapshot_dir(home: &Path) -> PathBuf {
     home.join("main-tree-snapshots")
 }
 
-fn snapshot_path(home: &Path, session_id: &str) -> PathBuf {
-    let safe: String = session_id
-        .chars()
+/// Strips a hook-supplied identifier (`session_id`, `agent_id`) to `[A-Za-z0-9_-]`, replacing
+/// every other character with `_`. This is what keeps such an identifier from ever introducing a
+/// path separator, a `..` segment, or (via `Path::join`'s "an absolute argument replaces the
+/// base" rule) turning a join into an absolute path of its own. Shared by every path built from
+/// one of these identifiers.
+fn sanitize_id(raw: &str) -> String {
+    raw.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -149,8 +153,11 @@ fn snapshot_path(home: &Path, session_id: &str) -> PathBuf {
                 '_'
             }
         })
-        .collect();
-    snapshot_dir(home).join(format!("{safe}.txt"))
+        .collect()
+}
+
+fn snapshot_path(home: &Path, session_id: &str) -> PathBuf {
+    snapshot_dir(home).join(format!("{}.txt", sanitize_id(session_id)))
 }
 
 /// Best-effort: a write failure here only costs the after-the-fact report, never the hook
@@ -458,11 +465,9 @@ fn subagent_event(
         return Ok(0);
     };
     let now = clock::now(env);
-    // Attributed to the first task in progress this session holds, if any; otherwise none.
-    let task_id = tasks::claimed_ids(&b.conn, &b.session.id)
-        .unwrap_or_default()
-        .into_iter()
-        .next();
+    // Attributed to the first task in progress this session holds, if any; otherwise none. The
+    // same ordering `briefing::prompt_line` uses to pick which task the reminder names.
+    let task_id = tasks::first_held_id(&b.conn, &b.session.id).unwrap_or_default();
     // Meta fallback: an identifier with no type reads the type and description from the
     // `agent-<id>.meta.json` file of this session beside the transcript. Read-only and
     // best-effort: a missing or unreadable file keeps whatever identity is already known.
@@ -522,22 +527,42 @@ fn subagent_event(
 }
 
 /// Reads `<dir(transcript)>/<session_id>/subagents/agent-<id>.meta.json` and returns the
-/// `agentType` and `description` it names. Never fails: a missing or unparseable file yields
-/// `None`s and the hook records the event with whatever identity is already known.
+/// `agentType` and `description` it names. `session_id` and `agent_id` are hook-supplied and
+/// untrusted, so both are run through `sanitize_id` before they touch a path — that alone keeps
+/// an absolute `session_id` or a `../`-laden `agent_id` from escaping the transcript's own
+/// directory. As a second, independent layer, the built path is refused unless its parent
+/// canonicalizes to somewhere inside the transcript directory's own canonical form (a
+/// canonicalize failure, including a directory that does not exist, is "do not read"), and
+/// `symlink_metadata` refuses anything at the meta path itself that is not a plain file — a
+/// symlink planted there is never followed. Never fails: a missing, unreadable or unparseable
+/// file yields `None`s and the hook records the event with whatever identity is already known.
 fn subagent_meta(
     transcript_path: &str,
     session_id: &str,
     agent_id: &str,
 ) -> (Option<String>, Option<String>) {
     let none = (None, None);
-    let path = Path::new(transcript_path).parent().map(|dir| {
-        dir.join(session_id)
-            .join("subagents")
-            .join(format!("agent-{agent_id}.meta.json"))
-    });
-    let Some(path) = path else {
+    let Some(base_dir) = Path::new(transcript_path).parent() else {
         return none;
     };
+    let path = base_dir
+        .join(sanitize_id(session_id))
+        .join("subagents")
+        .join(format!("agent-{}.meta.json", sanitize_id(agent_id)));
+    let Some(meta_dir) = path.parent() else {
+        return none;
+    };
+    let (Ok(base_canon), Ok(meta_dir_canon)) = (base_dir.canonicalize(), meta_dir.canonicalize())
+    else {
+        return none;
+    };
+    if !meta_dir_canon.starts_with(&base_canon) {
+        return none;
+    }
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_file() => {}
+        _ => return none,
+    }
     let Ok(text) = fs::read_to_string(&path) else {
         return none;
     };
@@ -703,5 +728,84 @@ mod tests {
             None,
             "not a repository"
         );
+    }
+
+    #[test]
+    fn subagent_meta_reads_an_ordinary_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let transcript = dir.path().join("t.jsonl");
+        let meta_dir = dir.path().join("s-1").join("subagents");
+        fs::create_dir_all(&meta_dir).unwrap();
+        fs::write(
+            meta_dir.join("agent-a1.meta.json"),
+            r#"{"agentType":"explore","description":"look around"}"#,
+        )
+        .unwrap();
+        let (ty, desc) = subagent_meta(transcript.to_string_lossy().as_ref(), "s-1", "a1");
+        assert_eq!(ty.as_deref(), Some("explore"));
+        assert_eq!(desc.as_deref(), Some("look around"));
+    }
+
+    #[test]
+    fn subagent_meta_refuses_an_absolute_session_id() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let legit = dir.path().join("legit");
+        fs::create_dir_all(&legit).unwrap();
+        let transcript = legit.join("t.jsonl");
+        // Planted where the pre-fix, unsanitized `Path::join` would have read it: an absolute
+        // `session_id` discards the transcript's own directory entirely under `Path::join`.
+        let evil = dir.path().join("evil");
+        let evil_meta_dir = evil.join("subagents");
+        fs::create_dir_all(&evil_meta_dir).unwrap();
+        fs::write(
+            evil_meta_dir.join("agent-a1.meta.json"),
+            r#"{"agentType":"planted","description":"should never be read"}"#,
+        )
+        .unwrap();
+        let (ty, desc) = subagent_meta(
+            transcript.to_string_lossy().as_ref(),
+            evil.to_string_lossy().as_ref(),
+            "a1",
+        );
+        assert_eq!((ty, desc), (None, None));
+    }
+
+    #[test]
+    fn subagent_meta_refuses_traversal_in_the_agent_id() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let transcript = dir.path().join("t.jsonl");
+        // Planted where `../`-in-`agent_id` would have escaped to, had it survived sanitizing.
+        let secret_dir = dir.path().join("secret");
+        fs::create_dir_all(&secret_dir).unwrap();
+        fs::write(
+            secret_dir.join("passwd.meta.json"),
+            r#"{"agentType":"planted","description":"should never be read"}"#,
+        )
+        .unwrap();
+        let (ty, desc) = subagent_meta(
+            transcript.to_string_lossy().as_ref(),
+            "s-1",
+            "../secret/passwd",
+        );
+        assert_eq!((ty, desc), (None, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subagent_meta_refuses_a_symlinked_meta_file() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::TempDir::new().unwrap();
+        let transcript = dir.path().join("t.jsonl");
+        let target = dir.path().join("target.json");
+        fs::write(
+            &target,
+            r#"{"agentType":"planted","description":"should never be read"}"#,
+        )
+        .unwrap();
+        let meta_dir = dir.path().join("s-1").join("subagents");
+        fs::create_dir_all(&meta_dir).unwrap();
+        symlink(&target, meta_dir.join("agent-a1.meta.json")).unwrap();
+        let (ty, desc) = subagent_meta(transcript.to_string_lossy().as_ref(), "s-1", "a1");
+        assert_eq!((ty, desc), (None, None));
     }
 }
