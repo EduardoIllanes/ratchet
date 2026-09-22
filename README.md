@@ -252,8 +252,8 @@ is not planned — it stays in `ops`, where it already runs daily (owner decisio
 ## Agents and skills
 
 
-Five agent profiles in `agents/`: `analyst`, `spec-test-author`, `implementer`, `reviewer`,
-`researcher` — see `docs/agent-doctrine.md` for how they are meant to be combined. Two skills:
+Six agent profiles in `agents/`: `analyst`, `spec-test-author`, `implementer`, `reviewer`,
+`refactorer`, `researcher` — see `docs/agent-doctrine.md` for how they are meant to be combined. Two skills:
 `ratchet-tasks` (working the board, writing handoffs) and `ratchet-pdf` (extracting text from a
 local PDF). The OpenSpec skills (`openspec-propose`, `-apply-change`, `-update-change`,
 `-sync-specs`, `-archive-change`, `-explore`) and the `/opsx:*` commands are included as-is

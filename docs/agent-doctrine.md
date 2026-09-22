@@ -1,6 +1,6 @@
 # Agent doctrine
 
-ratchet ships five agent profiles and two working rules. The rules are what make the profiles
+ratchet ships six agent profiles and two working rules. The rules are what make the profiles
 worth having.
 
 ## Rule 1: guardrails live in the harness, not in the prompt
@@ -19,6 +19,10 @@ agent should use, so it corrects itself in one attempt instead of improvising.
 - **reviewer** reads the diff against the spec, the checklist and the handoff, runs
   adversarial probes for real (always with doubles), runs the gate, and hunts side effects
   outside the declared scope. It describes a blocking finding; it never fixes it.
+- **refactorer** changes how code reads, never what it does: runs the gate before touching
+  anything, works in small steps with the gate after each, reverts a step that goes red, and
+  deletes only code with no reference in the crate and no mention in README, specs or skills.
+  A behaviour change it would need is reported as a proposal, not made.
 - **analyst** answers read-only questions (spec vs code, design comparisons) as board notes.
 - **researcher** extracts text from local PDFs with `ratchet pdf` and answers with citations.
 
