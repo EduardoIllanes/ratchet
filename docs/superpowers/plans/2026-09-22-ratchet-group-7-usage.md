@@ -14,15 +14,15 @@
 >    `tasks.updated_at` (which `note`/`handoff` do not bump — see `services/tasks.rs::note`). This
 >    reuses an existing read path with no new query. If the owner intended session activity or
 >    something else, only Task 4's `touched_at` helper changes.
-> 3. **A task resumed from `review` reopens its holding window only via a fresh `task.claimed`
->    event**, i.e. `ratchet task claim <id>` again (allowed for the same session even from
->    `review` — see `services/tasks.rs::claim`), not a bare `ratchet task status <id> in_progress`.
->    Requirement 3's own text only names `task.claimed` as the thing that opens a window, so a
->    plain status change back to `in_progress` (without reclaiming) currently leaves that phase's
->    tokens `unassigned`. This is probably a real gap for how operators actually resume a
->    reviewed task — flagged for the owner, not resolved here; Task 3's `holds()` implements the
->    literal spec text and Task 1's round-counting scenario reclaims for its second round so the
->    scenario is unambiguous either way.
+> 3. **`review` does not close a holding window — SETTLED 2026-09-22 (owner).** A hold opens on
+>    `task.claimed` and closes only on a `task.status` event to `done`, `blocked` or `ready`, or
+>    at session end. Board evidence: fix rounds after a CHANGES NEEDED verdict happen with the
+>    task still in `review`, with no reclaim and no status change, so the earlier literal rule
+>    (close on anything leaving `in_progress`) sent exactly those tokens to `unassigned`. A bare
+>    `status <id> in_progress` is a no-op for holds (the hold never closed); a fresh claim while
+>    already held opens a second hold on the same task, harmless under "most recently claimed
+>    wins". Requirement 3 of `openspec/specs/usage/spec.md` and D-usage-join were amended to say
+>    this; scenario "A fix round after a review verdict still belongs to the task" covers it.
 > 4. **A task-level aggregate `cost` (the bare listing's per-task row, and `--by task/session`)
 >    is shown only when every bucket folded into that row has a matching weight**; if any one
 >    bucket's model matches no configured prefix, the aggregate shows no `cost` at all rather than
@@ -65,7 +65,7 @@ group.
 **Spec:** `docs/superpowers/specs/2026-09-21-ratchet-usage-design.md` (the whole document; most
 directly §2 the facts this design rests on, §3 decisions D-usage-transcripts through
 D-usage-read-only, §4 commands and column format, §5 components, §6 error handling, §7 testing, §8
-delivery plan) and `openspec/specs/usage/spec.md` (10 requirements, 26 scenarios — already written
+delivery plan) and `openspec/specs/usage/spec.md` (10 requirements, 27 scenarios — already written
 and merged; this plan does not create it, only tests against it). Also extends
 `docs/superpowers/specs/2026-09-16-ratchet-plugin-design.md` for pre-existing conventions this plan
 reuses (D-english, D-specs-first, D-roles).
@@ -88,12 +88,12 @@ reuses (D-english, D-specs-first, D-roles).
   `cargo test -p ratchet --test spec`.
 - Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test -p ratchet`.
   **The full gate is expected to be RED from the end of Task 1 through the end of Task 3.** Task 1
-  writes all 26 `usage__*` scenario tests against the *existing* `openspec/specs/usage/spec.md`
+  writes all 27 `usage__*` scenario tests against the *existing* `openspec/specs/usage/spec.md`
   before any of `Cmd::Usage` exists in `main.rs`; every one of them fails with clap's "unrecognized
   subcommand" (exit 2) until Task 4 wires the CLI, exactly as group 3's pdf plan and group 6's map
   plan did it. Tasks 2 and 3 add pure modules with their own unit tests and their own green
   criterion (`cargo test -p ratchet --bin ratchet usage::`); they do not move any scenario test.
-  Task 4 turns scenarios 1–23 green (everything except the three `--note` scenarios); Task 5 turns
+  Task 4 turns scenarios 1–23 and 27 green (everything except the three `--note` scenarios); Task 5 turns
   24–26 green and the full gate clean. Task 6 re-runs everything to confirm, not to finish it.
   Nobody weakens a test to turn the gate green early.
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are **not** expected to go
@@ -128,12 +128,12 @@ reuses (D-english, D-specs-first, D-roles).
 ## File structure
 
 ```
-openspec/specs/usage/spec.md            already exists — 10 requirements, 26 scenarios (not this plan's job)
+openspec/specs/usage/spec.md            already exists — 10 requirements, 27 scenarios (not this plan's job)
 crates/ratchet/tests/spec/
 ├── main.rs                             Task 1 — + `mod usage;` (alphabetical, after `tasks`)
 ├── support.rs                          Task 1 — append only: TranscriptBuilder, Usage, ToolUse,
 │                                        seed_subagent_event(), usage() cli helper
-└── usage.rs                            Task 1 — 26 scenario tests
+└── usage.rs                            Task 1 — 27 scenario tests
 crates/ratchet/src/
 ├── main.rs                             Task 4 (+ Cmd::Usage, dispatch); Task 2 adds `mod usage;`
 ├── config.rs                           Task 2 — + ModelWeights, UsageSettings, MachineConfig.usage
@@ -172,6 +172,7 @@ This table says which task is expected to turn each one green.
 | 6 | `one_task_one_session_orchestrator_only` | Task 4 |
 | 7 | `two_tasks_held_in_sequence_split_the_session` | Task 4 |
 | 8 | `calls_outside_any_held_task_are_unassigned` | Task 4 |
+| 27 | `a_fix_round_after_a_review_verdict_still_belongs_to_the_task` | Task 4 |
 | 9 | `a_subagent_is_attributed_through_its_start_event` | Task 4 |
 | 10 | `a_subagent_is_attributed_through_tooluseid_when_no_event_exists` | Task 4 |
 | 11 | `a_subagent_is_attributed_by_first_timestamp_when_both_are_missing` | Task 4 |
@@ -192,7 +193,7 @@ This table says which task is expected to turn each one green.
 | 26 | `without_note_nothing_is_written` | Task 5 |
 
 Task 4 turns 23 green (1–23); Task 5 turns the remaining 3 green (24–26) plus README/doctrine
-additions (no test). Task 6 adds no new scenario; it re-runs the full suite and must find all 26
+additions (no test). Task 6 adds no new scenario; it re-runs the full suite and must find all 27
 green already, gate clean.
 
 ---
@@ -209,7 +210,7 @@ green already, gate clean.
 - Consumes: `crate::support::{Sandbox, board, sandbox, task, new_task, T0, at, code, stdout,
   stderr, db, count, out_files, cli}` (all already in the repo — see
   `crates/ratchet/tests/spec/support.rs`).
-- Produces: the 26 scenario titles and their exact `fn usage__<slug>()` names (table above — the
+- Produces: the 27 scenario titles and their exact `fn usage__<slug>()` names (table above — the
   slugs are mechanical: `crates/ratchet/tests/scenarios.rs::slug()` already enforces
   `fn usage__<slug>(` exists for every `#### Scenario:` of `openspec/specs/usage/spec.md`, and
   that check is *currently red* on this branch — `openspec/specs/usage/spec.md` exists but no
@@ -516,7 +517,7 @@ file) — no import changes are needed; `TempDir`, `Value`/`json!`, `fs`, `Path`
 
 Run: `cargo test -p ratchet --test spec --no-run`
 Expected: compiles clean (no `usage.rs` exists yet, so nothing calls the new helpers yet — this
-step exists only to catch a typo in Step 2 before Step 4 adds 26 call sites at once).
+step exists only to catch a typo in Step 2 before Step 4 adds 27 call sites at once).
 
 - [ ] **Step 4: Write `crates/ratchet/tests/spec/usage.rs`**
 
@@ -805,6 +806,25 @@ fn usage__a_dispatch_ends_orientation_without_a_claim() {
     assert!(text.contains("50"), "{text}"); // 25 + 25 -- the dispatching call itself is included
 }
 
+#[test]
+fn usage__a_fix_round_after_a_review_verdict_still_belongs_to_the_task() {
+    let sb = board("s-27");
+    let id = new_task(&sb, "fix round", &[], "s-27", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-27", 2)), 0);
+    let tb = TranscriptBuilder::new();
+    tb.call(&sb.root(), "s-27", &at(3), "claude-sonnet-5", &usage(10, 0, 0, 1));
+    assert_eq!(code(&task(&sb, &["status", &id, "review"], "s-27", 4)), 0);
+    // No reclaim, no status change: this is how fix rounds actually happen on the board.
+    tb.call(&sb.root(), "s-27", &at(5), "claude-sonnet-5", &usage(30, 0, 0, 3))
+        .call(&sb.root(), "s-27", &at(6), "claude-sonnet-5", &usage(30, 0, 0, 3));
+
+    let out = usage(&sb, &tb, &[&id], &sb.root(), &[("RATCHET_NOW", &at(7))]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("70"), "{text}"); // 10 + 30 + 30, all on the task
+    assert!(!text.contains("unassigned"), "{text}");
+}
+
 // --- Requirement: Review rounds are counted from status events ------------------------------
 
 #[test]
@@ -815,12 +835,12 @@ fn usage__two_review_rounds_and_tokens_per_round() {
     let tb = TranscriptBuilder::new();
     tb.call(&sb.root(), "s-15", &at(3), "claude-sonnet-5", &usage(40, 0, 0, 4));
     assert_eq!(code(&task(&sb, &["status", &id, "review"], "s-15", 4)), 0);
-    // Resumes by reclaiming (allowed for the same session even from `review`) -- see
-    // Assumption 3 at the top of this plan for why a bare `status ... in_progress` would not
-    // reopen the window.
-    assert_eq!(code(&task(&sb, &["claim", &id], "s-15", 5)), 0);
-    tb.call(&sb.root(), "s-15", &at(6), "claude-sonnet-5", &usage(70, 0, 0, 7))
-        .call(&sb.root(), "s-15", &at(7), "claude-sonnet-5", &usage(70, 0, 0, 7));
+    // The fix round runs with the task still in `review`: no reclaim, no status change
+    // (Assumption 3 -- `review` does not close the hold). The bare `status ... in_progress`
+    // afterwards only exists so the second `status ... review` is a real transition.
+    tb.call(&sb.root(), "s-15", &at(5), "claude-sonnet-5", &usage(70, 0, 0, 7))
+        .call(&sb.root(), "s-15", &at(6), "claude-sonnet-5", &usage(70, 0, 0, 7));
+    assert_eq!(code(&task(&sb, &["status", &id, "in_progress"], "s-15", 7)), 0);
     assert_eq!(code(&task(&sb, &["status", &id, "review"], "s-15", 8)), 0);
 
     let out = usage(&sb, &tb, &[&id], &sb.root(), &[("RATCHET_NOW", &at(9))]);
@@ -1071,13 +1091,13 @@ Run: `cargo test -p ratchet --test spec --no-run`
 Expected: compiles clean.
 
 Run: `cargo test -p ratchet --test spec usage::`
-Expected: all 26 `usage__*` tests FAIL. Every failure's stderr contains clap's own
+Expected: all 27 `usage__*` tests FAIL. Every failure's stderr contains clap's own
 `error: unrecognized subcommand 'usage'` (exit code 2) — never a panic, never a compile error.
-Reading a handful of the failures is enough to confirm this; running the full 26 is only to prove
+Reading a handful of the failures is enough to confirm this; running the full 27 is only to prove
 none of them panics for an unrelated reason (a typo in a JSON field name, a wrong path, etc.).
 
 Run: `cargo test -p ratchet --test scenarios`
-Expected: PASS — `every_scenario_has_a_test` is satisfied now that `usage.rs` names all 26
+Expected: PASS — `every_scenario_has_a_test` is satisfied now that `usage.rs` names all 27
 functions `openspec/specs/usage/spec.md` requires; this test does not care whether `ratchet usage`
 itself exists yet.
 
@@ -1695,7 +1715,7 @@ end of Task 1 (same failure mode, not a new one):
 cargo test -p ratchet --test spec usage::
 ```
 
-Expected: all 26 still FAIL with clap's "unrecognized subcommand" — nothing in this task touched
+Expected: all 27 still FAIL with clap's "unrecognized subcommand" — nothing in this task touched
 `main.rs`'s `Cmd` enum or `cli/mod.rs`.
 
 - [ ] **Step 9: Commit**
@@ -1875,10 +1895,11 @@ pub struct Hold {
 }
 
 /// R3: a hold opens on `task.claimed` and closes on the first `task.status` event for that same
-/// task whose `to` leaves `in_progress` (`review`, `blocked`, `done`, `ready`), or at
-/// `session_end`, whichever comes first. A `task.status` event whose `to` is `in_progress` never
-/// opens or reopens a hold by itself — see the plan's Assumption 3 for why a task resumed from
-/// `review` without a fresh `task.claimed` currently does not reopen its window. Several holds
+/// task whose `to` is `done`, `blocked` or `ready`, or at `session_end`, whichever comes first.
+/// `review` does NOT close a hold (Assumption 3, settled): fix rounds after a verdict happen
+/// with the task still in `review` and belong to it. A `task.status` event to `in_progress`
+/// (or `review`) is a no-op here. A fresh `task.claimed` on a task already held opens a second
+/// hold on it, harmless under "most recently claimed wins". Several holds
 /// may be open at once (a session that claims a second task before releasing the first); no
 /// hold's `end` is ever truncated by a later claim — `task_at` below is what implements "the
 /// most recently claimed wins" for an instant covered by more than one open hold, by
@@ -1895,7 +1916,9 @@ pub fn holds(events: &[SessionEvent], session_end: Option<DateTime<Utc>>) -> Vec
             SessionEventKind::Claimed { task } => {
                 open.push(Hold { task: task.clone(), start: ev.ts, end: None });
             }
-            SessionEventKind::Status { task, to } if to != "in_progress" => {
+            SessionEventKind::Status { task, to }
+                if matches!(to.as_str(), "done" | "blocked" | "ready") =>
+            {
                 if let Some(pos) = open.iter().position(|h| &h.task == task) {
                     let mut h = open.remove(pos);
                     h.end = Some(ev.ts);
@@ -2226,7 +2249,7 @@ mod tests {
             },
             SessionEvent {
                 ts: at("2026-09-16T12:10:00Z"),
-                kind: SessionEventKind::Status { task: "T-0001".into(), to: "review".into() },
+                kind: SessionEventKind::Status { task: "T-0001".into(), to: "done".into() },
             },
         ];
         let h = holds(&events, None);
@@ -2236,6 +2259,31 @@ mod tests {
             None,
             "the release instant is not inside the closed window"
         );
+    }
+
+    #[test]
+    fn review_does_not_close_the_hold() {
+        let events = vec![
+            SessionEvent {
+                ts: at("2026-09-16T12:00:00Z"),
+                kind: SessionEventKind::Claimed { task: "T-0001".into() },
+            },
+            SessionEvent {
+                ts: at("2026-09-16T12:10:00Z"),
+                kind: SessionEventKind::Status { task: "T-0001".into(), to: "review".into() },
+            },
+            SessionEvent {
+                ts: at("2026-09-16T12:20:00Z"),
+                kind: SessionEventKind::Status { task: "T-0001".into(), to: "ready".into() },
+            },
+        ];
+        let h = holds(&events, None);
+        assert_eq!(
+            task_at(&h, at("2026-09-16T12:15:00Z")),
+            Some("T-0001"),
+            "a fix round while the task sits in review still belongs to it"
+        );
+        assert_eq!(task_at(&h, at("2026-09-16T12:20:00Z")), None, "ready closes it");
     }
 
     #[test]
@@ -2251,7 +2299,7 @@ mod tests {
             },
             SessionEvent {
                 ts: at("2026-09-16T12:10:00Z"),
-                kind: SessionEventKind::Status { task: "T-0002".into(), to: "review".into() },
+                kind: SessionEventKind::Status { task: "T-0002".into(), to: "done".into() },
             },
         ];
         let h = holds(&events, None);
@@ -2506,7 +2554,7 @@ cargo fmt --check
 cargo test -p ratchet --test spec usage::
 ```
 
-Expected: the first three PASS/clean; the last still shows all 26 `usage__*` scenarios failing
+Expected: the first three PASS/clean; the last still shows all 27 `usage__*` scenarios failing
 with clap's "unrecognized subcommand" — same as after Task 2, nothing here touched `main.rs`'s
 `Cmd` enum.
 
@@ -2547,7 +2595,7 @@ git commit -m "feat(usage): attribute calls to tasks, roles and models"
 adding the flag now would turn scenario 24 green early and steal Task 5's green criterion.
 If you are tempted, re-read the allocation table instead.
 
-**Green criterion for this task:** scenarios 1–23 green; scenarios 24–26 still fail (with
+**Green criterion for this task:** scenarios 1–23 and 27 green; scenarios 24–26 still fail (with
 clap's "unexpected argument '--note'" — the mirror image of Task 2/3's "unrecognized
 subcommand", expected and correct here):
 
@@ -2587,7 +2635,8 @@ Resolution order inside `collect`, with no exceptions:
    `ParseResult` counts into `partial` and skipping empty results with one `skipped` entry
    (scenarios 4–5 — the substrings `skipped ` and `partial ` come from here).
 5. Holds: session events (`task.claimed`, `task.status`, `session.end`) → `attribute::holds`
-   (Assumption 3's literal rule: windows open on `task.claimed` only).
+   (Assumption 3: windows open on `task.claimed`, close on `done`/`blocked`/`ready` or session
+   end; `review` leaves them open).
 6. Orchestrator calls: `attribute::task_at(&holds, ts)` → `Some(task)` or `unassigned`.
 7. Subagent transcripts under `subagents_dir`: `read_meta` for `tool_use_id`/`agent_type`;
    the `SubagentEvent` for `subagent_task_and_role` is built from the row's `task_id` column
@@ -2642,7 +2691,7 @@ git commit -m "feat(usage): report token cost per task, role and model"
   and report it, do not reach around into Task 3 internals from the CLI layer).
 - Produces: nothing frozen — this is the last production task.
 
-**Green criterion for this task:** scenarios 24–26 green (all 26 green), gate clean:
+**Green criterion for this task:** scenarios 24–26 green (all 27 green), gate clean:
 
 ```bash
 cargo test -p ratchet --test spec usage::
@@ -2672,7 +2721,7 @@ flag changes no render.
   (the command's ONLY write). `docs/agent-doctrine.md` gains one line under the task flow:
   cost questions are answered with `ratchet usage`, never by reading transcripts by hand.
 
-- [ ] **Step 4: Run the green criterion.** Expected: all 26 `usage__*` green.
+- [ ] **Step 4: Run the green criterion.** Expected: all 27 `usage__*` green.
 
 - [ ] **Step 5: Commit**
 
@@ -2699,7 +2748,7 @@ cargo test -p ratchet
 ```
 
 - [ ] **Step 1: Spec ↔ tests ↔ code, 1:1.** Every `#### Scenario` of
-  `openspec/specs/usage/spec.md` names its `usage__*` test (26/26, no orphans either way);
+  `openspec/specs/usage/spec.md` names its `usage__*` test (27/27, no orphans either way);
   every stable substring in Task 1's list is produced by the module Task 1's table says
   produces it. `scenarios::every_scenario_has_a_test` is green.
 - [ ] **Step 2: Adversarial probes with doubles** (throwaway temp dirs, `RATCHET_HOME` and

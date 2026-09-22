@@ -51,10 +51,12 @@ understood records SHALL add one to `skipped` and be reported once, never as an 
 
 ### Requirement: A call belongs to the task its session held at that instant
 A session holds a task from the timestamp of its `task.claimed` event until the first
-`task.status` event that leaves `in_progress` (`review`, `done`, `blocked`, `ready`) or the
-session's `ended_at`, whichever comes first. A call at exactly the claim timestamp belongs to
-the task. When a session holds several tasks at once the most recently claimed wins. Calls
-outside any held task go to an `unassigned` bucket for that session.
+`task.status` event whose new status is `done`, `blocked` or `ready`, or the session's
+`ended_at`, whichever comes first. A `task.status` event to `review` does NOT close the hold:
+the fix rounds that follow a review verdict happen with the task still in `review` and belong
+to it. A call at exactly the claim timestamp belongs to the task. When a session holds several
+tasks at once the most recently claimed wins. Calls outside any held task go to an `unassigned`
+bucket for that session.
 
 #### Scenario: One task, one session, orchestrator only
 - **WHEN** a session claims `T-0001`, makes three assistant calls, then moves it to `review`
@@ -65,8 +67,12 @@ outside any held task go to an `unassigned` bucket for that session.
 - **THEN** `T-0001` totals the first two calls and `T-0002` the third, and nothing is double counted
 
 #### Scenario: Calls outside any held task are unassigned
-- **WHEN** a session makes two calls before its first claim and one after releasing its last task
+- **WHEN** a session makes two calls before its first claim and one after moving its last task to `done`
 - **THEN** `ratchet usage --by session` shows those three calls under `unassigned` for that session
+
+#### Scenario: A fix round after a review verdict still belongs to the task
+- **WHEN** a session claims `T-0001`, moves it to `review`, then makes two calls with no further claim or status change
+- **THEN** `ratchet usage T-0001` counts those two calls under `T-0001`, not under `unassigned`
 
 ### Requirement: Subagent calls are attributed through ratchet's own events first
 A subagent transcript `agent-<id>.jsonl` SHALL be attributed, in order: to the task named by
@@ -91,8 +97,8 @@ the transcript, never from events.
 - **THEN** the subagent's tokens appear under `T-0002` with role `subagent`
 
 #### Scenario: A general-purpose subagent shows its description
-- **WHEN** a subagent's role is `general-purpose` and its description is `find every caller of parse_repo_config in the tree and list them`
-- **THEN** its row reads `general-purpose: find every caller of parse_repo_config in` and nothing more of the description
+- **WHEN** a subagent's role is `general-purpose` and its description is `find each caller of parse_repo_config in the tree and list them`
+- **THEN** its row reads `general-purpose: find each caller of parse_repo_config in` (the first 40 characters) and nothing more of the description
 
 ### Requirement: Orientation is the orchestrator's cost before real work starts
 Per session, orientation SHALL be the orchestrator's tokens from the session's first record
@@ -114,7 +120,7 @@ Tokens per round SHALL be the task's tokens between consecutive entries into `re
 first round counting from the first claim.
 
 #### Scenario: Two review rounds and tokens per round
-- **WHEN** `T-0001` goes `review`, back to `in_progress` with two more calls, then `review` again
+- **WHEN** `T-0001` goes `review`, then two more calls while it stays in `review`, then `review` again after a bare `status` back to `in_progress`
 - **THEN** `ratchet usage T-0001` shows `rounds 2` and two per-round lines, the second equal to the two calls in between
 
 ### Requirement: Weights add a cost column, and only then

@@ -55,10 +55,12 @@ configure weights), anything that changes how Claude Code records usage.
   counts when non-zero, and with the highest `version` seen, so a format change shows up as a
   visible number rather than as silent zeros.
 - **D-usage-join.** A call is attributed to the task its session held at the call's timestamp:
-  the task is held from `task.claimed` until a `task.status` event leaves `in_progress`
-  (`review`, `done`, `blocked`, `ready`) or the session ends. A session holding several tasks
-  at once attributes to the most recently claimed. Calls outside any held task go to
-  `unassigned` for that session.
+  the task is held from `task.claimed` until a `task.status` event to `done`, `blocked` or
+  `ready`, or the session ends. `review` does not close the hold (decided 2026-09-22: on the
+  board, fix rounds after a CHANGES NEEDED verdict happen with the task still in `review`, with
+  no reclaim and no status change, so closing on `review` would send exactly the tokens the
+  owner wants to see into `unassigned`). A session holding several tasks at once attributes to
+  the most recently claimed. Calls outside any held task go to `unassigned` for that session.
 - **D-usage-subagents.** A subagent's calls are attributed to one task and one role, resolved
   in this order: (1) the `subagent.start` (or `subagent.stop`) event whose `agent_id` matches
   the transcript's `<id>`, which already names the task and the `agent_type`; (2) failing
