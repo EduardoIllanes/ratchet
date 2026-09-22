@@ -1,6 +1,6 @@
 # Agent doctrine
 
-ratchet ships six agent profiles and two working rules. The rules are what make the profiles
+ratchet ships seven agent profiles and two working rules. The rules are what make the profiles
 worth having.
 
 ## Rule 1: guardrails live in the harness, not in the prompt
@@ -25,6 +25,9 @@ agent should use, so it corrects itself in one attempt instead of improvising.
   A behaviour change it would need is reported as a proposal, not made.
 - **analyst** answers read-only questions (spec vs code, design comparisons) as board notes.
 - **researcher** extracts text from local PDFs with `ratchet pdf` and answers with citations.
+- **mapper** describes header-less files for `ratchet map`, one sentence each, through
+  `ratchet map note` — the only file it ever touches is `.ratchet/map.notes`, and only through
+  that command, never by editing it directly.
 
 An orchestrating session dispatches them and reads their reports; it does not implement. That
 is the only way its context stays useful at the end of the day.

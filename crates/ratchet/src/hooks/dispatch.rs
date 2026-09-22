@@ -195,7 +195,13 @@ pub fn session_start(
     // above this line.
     println!(
         "{}",
-        briefing::build(&conn, &session, &repo.config.thresholds, now)
+        briefing::build(
+            &conn,
+            &session,
+            &repo.main_root,
+            &repo.config.thresholds,
+            now
+        )
     );
 
     tasks::release_dead(

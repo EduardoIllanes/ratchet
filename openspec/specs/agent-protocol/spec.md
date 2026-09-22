@@ -150,7 +150,8 @@ of at most 40 lines containing: the repo, the abbreviated session identifier and
 session's own tasks in progress with their last handoff; the repo's tasks in progress held by
 sessions that died, with their last handoff; up to five tasks ready to take, ordered by priority;
 and one line naming the commands and the skill with the full guide. When the repo has none of those
-tasks, the briefing SHALL be a single line. The briefing SHALL be built before the work of dead
+tasks, the briefing SHALL be a single line, plus the map freshness line when the map capability has
+one to show (see `openspec/specs/map/spec.md`). The briefing SHALL be built before the work of dead
 sessions is returned to the queue, so an orphaned task is shown once with its handoff before it goes
 back.
 
@@ -160,7 +161,7 @@ back.
 
 #### Scenario: No tasks, one line
 - **WHEN** a session starts in a repo with no tasks in progress, none orphaned and none ready
-- **THEN** the briefing is exactly one line, with the repo, the session and the branch
+- **THEN** the briefing is exactly one line, with the repo, the session and the branch, apart from the map freshness line
 
 #### Scenario: The briefing never exceeds forty lines
 - **WHEN** a session starts in a repo with far more tasks than fit

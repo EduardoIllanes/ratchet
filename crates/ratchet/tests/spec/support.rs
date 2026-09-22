@@ -677,3 +677,131 @@ pub fn lines(out: &Output) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
+
+// --- group 6: map ----------------------------------------------------------------------------
+
+/// Run `ratchet map <args>` against the sandbox, from its root.
+pub fn map(sb: &Sandbox, args: &[&str]) -> Output {
+    Command::new(ratchet_bin())
+        .arg("map")
+        .args(args)
+        .current_dir(sb.root())
+        .env("RATCHET_HOME", sb.home.path())
+        .env_remove("RATCHET_SESSION_ID")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap()
+}
+
+/// Like `map`, but with extra environment (`RATCHET_NOW`, mainly).
+pub fn map_env(sb: &Sandbox, args: &[&str], extra: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(ratchet_bin());
+    cmd.arg("map")
+        .args(args)
+        .current_dir(sb.root())
+        .env("RATCHET_HOME", sb.home.path())
+        .env_remove("RATCHET_SESSION_ID")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    cmd.output().unwrap()
+}
+
+/// Writes a `.rs` file with a `//!` doc-comment header (or none, when `header` is `None`) and a
+/// short body — enough to be a plausible Rust module without needing real code.
+pub fn write_rust_module(sb: &Sandbox, rel: &str, header: Option<&str>, body: &str) -> PathBuf {
+    let text = match header {
+        Some(h) => format!("//! {h}\n\n{body}\n"),
+        None => format!("{body}\n"),
+    };
+    sb.write(rel, &text)
+}
+
+/// Writes a `.py` file with a triple-quoted module docstring (or none).
+pub fn write_python_module(sb: &Sandbox, rel: &str, header: Option<&str>, body: &str) -> PathBuf {
+    let text = match header {
+        Some(h) => format!("\"\"\"{h}\"\"\"\n\n{body}\n"),
+        None => format!("{body}\n"),
+    };
+    sb.write(rel, &text)
+}
+
+/// Writes a `.ts` file with a `/** … */` leading block comment (or none).
+pub fn write_ts_module(sb: &Sandbox, rel: &str, header: Option<&str>, body: &str) -> PathBuf {
+    let text = match header {
+        Some(h) => format!("/**\n * {h}\n */\n\n{body}\n"),
+        None => format!("{body}\n"),
+    };
+    sb.write(rel, &text)
+}
+
+/// Writes a file with no recognised header at all — any extension, any content.
+pub fn write_plain_file(sb: &Sandbox, rel: &str, body: &str) -> PathBuf {
+    sb.write(rel, body)
+}
+
+/// `git add <files> && git commit -m <msg>` in the sandbox's repo — the only way a fixture file
+/// becomes visible to `git ls-files`, which is what `ratchet map` actually reads.
+pub fn commit(sb: &Sandbox, files: &[&str], msg: &str) {
+    let root = sb.repo.path();
+    let mut args = vec!["add"];
+    args.extend_from_slice(files);
+    git(root, &args);
+    git(root, &["commit", "-q", "-m", msg]);
+}
+
+/// `HEAD`'s full sha, from the sandbox's repo.
+#[allow(dead_code)] // kept for later map tasks; no scenario calls it yet
+pub fn head_sha(sb: &Sandbox) -> String {
+    let out = Command::new("git")
+        .args(["-C", &sb.repo.path().to_string_lossy(), "rev-parse", "HEAD"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The written map's text, or empty when absent.
+pub fn read_map(sb: &Sandbox) -> String {
+    fs::read_to_string(sb.root().join(".ratchet/map.md")).unwrap_or_default()
+}
+
+/// `.ratchet/map.notes`'s text, or empty when absent.
+pub fn read_notes(sb: &Sandbox) -> String {
+    fs::read_to_string(sb.root().join(".ratchet/map.notes")).unwrap_or_default()
+}
+
+/// Replaces `CLAUDE.md` at the sandbox root with a symlink to `target` — used only by the
+/// `--wire` refusal scenario. Unix-only (`cfg(unix)`), matching every other symlink-dependent
+/// test convention in this repo (there are none yet outside this one; keep it gated the same way
+/// the rest of the suite gates anything OS-specific).
+#[cfg(unix)]
+pub fn symlink_claude_md(sb: &Sandbox, target: &Path) {
+    use std::os::unix::fs::symlink;
+    let link = sb.root().join("CLAUDE.md");
+    let _ = fs::remove_file(&link);
+    symlink(target, &link).unwrap();
+}
+
+/// Run `ratchet map <args>` with no sandbox at all — for the "outside a marker repo" scenarios,
+/// where `dir` deliberately has no `ratchet.toml` above it (`unmanaged_dir()`).
+pub fn map_at(dir: &Path, home: &Path, args: &[&str]) -> Output {
+    Command::new(ratchet_bin())
+        .arg("map")
+        .args(args)
+        .current_dir(dir)
+        .env("RATCHET_HOME", home)
+        .env_remove("RATCHET_SESSION_ID")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap()
+}

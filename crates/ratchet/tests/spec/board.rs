@@ -66,8 +66,10 @@ fn agent_protocol__no_tasks_one_line() {
         &[("RATCHET_NOW", T0)],
     );
     assert_eq!(code(&out), 0, "{}", stderr(&out));
-    let printed = lines(&out);
-    assert_eq!(printed.len(), 1, "{printed:?}");
+    // The map capability may add its own freshness line; everything else is the one line.
+    let all = lines(&out);
+    let printed: Vec<&String> = all.iter().filter(|l| !l.starts_with("map:")).collect();
+    assert_eq!(printed.len(), 1, "{all:?}");
     assert!(printed[0].starts_with("[ratchet] repo "), "{}", printed[0]);
     assert!(printed[0].contains("session"), "{}", printed[0]);
     assert!(printed[0].contains("branch"), "{}", printed[0]);
