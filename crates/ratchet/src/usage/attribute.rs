@@ -17,8 +17,6 @@ use crate::usage::weights;
 /// Requirement 9 (`--json`) specifies. `thinking` is already counted inside `output` on the wire
 /// (design §4: "out, with thinking inside") — tracked separately here only for display, and
 /// `all()` does not double-add it.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct Totals {
     pub input: u64,
@@ -54,8 +52,6 @@ impl Totals {
 }
 
 /// `k`/`M` with one decimal, per design §4's column rule. Below 1000 prints as-is.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn abbreviate(n: u64) -> String {
     if n < 1000 {
         n.to_string()
@@ -68,8 +64,6 @@ pub fn abbreviate(n: u64) -> String {
 
 /// "7d" / "30d" / an RFC 3339 date (`2026-09-01`, midnight UTC). The caller supplies the default
 /// (`"7d"`) when `--since` is absent — this function does not know about defaults.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn since_cutoff(spec: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
     let spec = spec.trim();
     if let Some(days) = spec.strip_suffix('d') {
@@ -87,8 +81,6 @@ pub fn since_cutoff(spec: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, Str
 
 /// `general-purpose` shows with the first 40 characters of its description and nothing more of
 /// it; every other role prints as-is (D-usage-subagents).
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn display_role(role: &str, description: Option<&str>) -> String {
     if role == "general-purpose" {
         let clipped: String = description.unwrap_or_default().chars().take(40).collect();
@@ -102,16 +94,12 @@ pub fn display_role(role: &str, description: Option<&str>) -> String {
 /// the caller (`cli::usage_cmd`, Task 4, via `services::events::for_session`): a `task.claimed`
 /// row becomes `Claimed`, a `task.status` row becomes `Status` with `to` read from
 /// `payload.to`.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEventKind {
     Claimed { task: String },
     Status { task: String, to: String },
 }
 
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionEvent {
     pub ts: DateTime<Utc>,
@@ -120,8 +108,6 @@ pub struct SessionEvent {
 
 /// One interval during which a session held one task, half-open `[start, end)`. `end: None`
 /// means "still held" — `holds()` always closes these against `session_end` before returning.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hold {
     pub task: String,
@@ -139,8 +125,6 @@ pub struct Hold {
 /// hold's `end` is ever truncated by a later claim — `task_at` below is what implements "the
 /// most recently claimed wins" for an instant covered by more than one open hold, by
 /// construction, without this function needing a stack-pop/reactivate step.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn holds(events: &[SessionEvent], session_end: Option<DateTime<Utc>>) -> Vec<Hold> {
     let mut open: Vec<Hold> = Vec::new();
     let mut closed: Vec<Hold> = Vec::new();
@@ -178,8 +162,6 @@ pub fn holds(events: &[SessionEvent], session_end: Option<DateTime<Utc>>) -> Vec
 /// The task `at` belongs to: the hold with the latest `start` whose window contains `at` (start
 /// inclusive, end exclusive), or `None` for "unassigned". "Most recently claimed wins" falls out
 /// of `max_by_key(start)` directly when more than one hold's window contains `at`.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn task_at(holds: &[Hold], at: DateTime<Utc>) -> Option<&str> {
     holds
         .iter()
@@ -194,8 +176,6 @@ pub fn task_at(holds: &[Hold], at: DateTime<Utc>) -> Option<&str> {
 /// not what follows it). `calls_sorted` must be sorted by `ts` ascending and must be the
 /// orchestrator's own calls only (role `orchestrator`) — a subagent's calls are never part of
 /// orientation.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn orientation(
     calls_sorted: &[&transcript::Call],
     first_claim: Option<DateTime<Utc>>,
@@ -221,8 +201,6 @@ pub fn orientation(
 
 /// Component-wise average, rounded to the nearest token. Empty input averages to zero. Used for
 /// "orientation shown per task as the average over the task's sessions" (design §4).
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn average_totals(items: &[Totals]) -> Totals {
     if items.is_empty() {
         return Totals::default();
@@ -242,8 +220,6 @@ pub fn average_totals(items: &[Totals]) -> Totals {
 /// the top of this plan): `agent_id`/`agent_type`/`description` come from `events.payload`;
 /// `task` comes from the event row's own `task_id` column, never from the payload (which has
 /// no `task_id` field).
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubagentEvent {
     pub agent_id: String,
@@ -259,8 +235,6 @@ pub struct SubagentEvent {
 /// an `Agent` `tool_use`, as `(tool_use_id, ts)` pairs. `parent_holds` are the parent session's
 /// holds (`holds()`, above). Returns `(task, role)`; `role` is not yet display-formatted — pass
 /// it through `display_role` before printing.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn subagent_task_and_role(
     event: Option<&SubagentEvent>,
     meta: Option<&Meta>,
@@ -300,8 +274,6 @@ pub fn subagent_task_and_role(
 /// face only needs to build it once per report. `role` here is the *raw* role (e.g.
 /// `general-purpose`, not yet display-formatted) — callers pass it through `display_role` for
 /// anything printed.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AttributedCall {
     pub task: Option<String>,
@@ -314,8 +286,6 @@ pub struct AttributedCall {
 
 /// One role×model×session row. `cost` is `None` unless `buckets_of` was given weights and a
 /// prefix matched this bucket's `model`.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct Bucket {
     pub session: String,
@@ -329,8 +299,6 @@ pub struct Bucket {
 /// Sums `calls` grouped by an arbitrary string key — the shared engine behind `--by
 /// task|role|model|session` (Task 4 supplies the key closure per flag). `BTreeMap` keeps output
 /// order deterministic without a separate sort step.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn group_totals(
     calls: &[AttributedCall],
     key: impl Fn(&AttributedCall) -> String,
@@ -346,8 +314,6 @@ pub fn group_totals(
 /// `buckets` array uses (Requirement 9). `weights` is `None` when the machine config has no
 /// `[usage.weights]` table at all; when `Some`, each bucket's `cost` is set from its own model,
 /// independently — a bucket whose model matches no prefix simply has `cost: None`.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn buckets_of(
     calls: &[AttributedCall],
     weights: Option<&HashMap<String, ModelWeights>>,
@@ -386,8 +352,6 @@ pub fn buckets_of(
 /// The same calls collapsed to `(role, model)` — what the task-detail *text* view shows (design
 /// §4: "a line per role × model"; which sessions were involved is listed separately, not as a
 /// row dimension here).
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn totals_by_role_model(calls: &[AttributedCall]) -> BTreeMap<(String, String), Totals> {
     let mut out: BTreeMap<(String, String), Totals> = BTreeMap::new();
     for c in calls {
@@ -402,8 +366,6 @@ pub fn totals_by_role_model(calls: &[AttributedCall]) -> BTreeMap<(String, Strin
 /// `first_claim`. `review_entries` are the task's `task.status → review` timestamps, in order;
 /// `rounds` (the count Requirement 6 names) is simply `review_entries.len()`. `calls` must
 /// already be filtered to one task (every `AttributedCall` with `task == Some(that_id)`).
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn rounds_tokens(
     calls: &[AttributedCall],
     first_claim: DateTime<Utc>,
@@ -427,8 +389,6 @@ pub fn rounds_tokens(
 }
 
 /// `orchestrator` tokens ÷ all tokens, `0.0` when `buckets` is empty.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn orchestrator_share(buckets: &[Bucket]) -> f64 {
     let all: u64 = buckets.iter().map(|b| b.tokens.all()).sum();
     if all == 0 {
@@ -443,8 +403,6 @@ pub fn orchestrator_share(buckets: &[Bucket]) -> f64 {
 }
 
 /// `cache_read ÷ (input + cache_write + cache_read)`, `0.0` when that denominator is zero.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn cache_efficiency(t: &Totals) -> f64 {
     let denom = t.input + t.cache_write + t.cache_read;
     if denom == 0 {
@@ -456,8 +414,6 @@ pub fn cache_efficiency(t: &Totals) -> f64 {
 /// A task-level aggregate `cost`: the sum of every bucket's own cost, but only when *all* of them
 /// matched a weight (Assumption 4 at the top of this plan) — a partial sum would be misleading
 /// for a task that used more than one model.
-// Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn task_cost(buckets: &[Bucket]) -> Option<f64> {
     if buckets.is_empty() {
         return None;

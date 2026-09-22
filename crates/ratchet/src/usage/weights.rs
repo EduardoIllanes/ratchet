@@ -9,8 +9,6 @@ use std::collections::HashMap;
 use crate::config::ModelWeights;
 
 /// The configured weight whose prefix is the longest match of `model`, or `None`.
-// Consumed by usage::attribute (Task 3).
-#[allow(dead_code)]
 pub fn matching<'a>(
     model: &str,
     weights: &'a HashMap<String, ModelWeights>,
@@ -24,8 +22,6 @@ pub fn matching<'a>(
 
 /// `None` when no weight matches `model` — callers must never print a cost in that case
 /// (D-usage-weights: "without a matching weight, tokens only, never invent a price").
-// Consumed by usage::attribute (Task 3).
-#[allow(dead_code)]
 pub fn cost(
     model: &str,
     weights: &HashMap<String, ModelWeights>,

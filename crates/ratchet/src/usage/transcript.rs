@@ -12,7 +12,6 @@ use crate::clock;
 
 /// The four token classes plus thinking, all defaulting to zero for a record that lacks them.
 // Consumed by usage::attribute (Task 3) and cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
     pub input: u64,
@@ -24,7 +23,6 @@ pub struct Usage {
 
 /// One understood `"type": "assistant"` record.
 // Consumed by usage::attribute (Task 3) and cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Call {
     pub ts: DateTime<Utc>,
@@ -39,7 +37,6 @@ pub struct Call {
 /// Everything one transcript file's bytes turn into: the understood calls, plus the two counts
 /// and the highest `version` D-usage-tolerant requires every report to surface.
 // Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParseResult {
     pub calls: Vec<Call>,
@@ -85,7 +82,6 @@ struct RawThinking {
 /// `partial`; a transcript that ends with zero understood (assistant) records adds exactly one to
 /// `skipped`, once, regardless of how many garbage lines it had.
 // Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn parse(bytes: &[u8]) -> ParseResult {
     let mut out = ParseResult::default();
     let text = String::from_utf8_lossy(bytes);
@@ -198,7 +194,6 @@ fn version_key(v: &str) -> Vec<u64> {
 /// `/Users/e/.claude-mem/observer-sessions` becomes `-Users-e--claude-mem-observer-sessions`,
 /// the dot included).
 // Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn slug_for(cwd: &str) -> String {
     cwd.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -207,7 +202,6 @@ pub fn slug_for(cwd: &str) -> String {
 
 /// `<projects>/<slug>/<session id>.jsonl`.
 // Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn transcript_path(projects_dir: &Path, cwd: &str, session_id: &str) -> PathBuf {
     projects_dir
         .join(slug_for(cwd))
@@ -216,7 +210,6 @@ pub fn transcript_path(projects_dir: &Path, cwd: &str, session_id: &str) -> Path
 
 /// `<projects>/<slug>/<session id>/subagents/`.
 // Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn subagents_dir(projects_dir: &Path, cwd: &str, session_id: &str) -> PathBuf {
     projects_dir
         .join(slug_for(cwd))
@@ -226,7 +219,6 @@ pub fn subagents_dir(projects_dir: &Path, cwd: &str, session_id: &str) -> PathBu
 
 /// The sibling `agent-<id>.meta.json` of a subagent transcript.
 // Consumed by usage::attribute (Task 3) and cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Meta {
     pub agent_type: Option<String>,
@@ -253,7 +245,6 @@ struct RawMeta {
 /// `None` for anything that is not valid JSON — a missing meta file is normal (D-usage-subagents'
 /// third fallback), so this is not an error type, just an `Option`.
 // Consumed by cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 pub fn read_meta(bytes: &[u8]) -> Option<Meta> {
     let raw: RawMeta = serde_json::from_slice(bytes).ok()?;
     Some(Meta {

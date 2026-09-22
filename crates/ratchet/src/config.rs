@@ -141,8 +141,6 @@ pub struct ModelWeights {
     pub output: f64,
 }
 
-// Consumed by usage::weights (Task 2) and cli::usage_cmd (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct UsageSettings {
