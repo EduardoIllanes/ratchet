@@ -67,6 +67,36 @@ message whether the command arrived through `Bash` or `PowerShell`. Rules SHALL 
 extensible from a machine-wide file and from a repo file with the same schema; a rule with
 the id of an existing one SHALL replace it; a repo SHALL be able to disable a rule by id.
 
+A repo SHALL also be able to declare guardrail rules inline in its own `ratchet.toml`, under
+`[[guardrails.rules]]`, without a separate `extra` file: `name`, `match` (a regex over each
+command segment, the same matcher the built-in command rules use), `message`, and an optional
+`tools` list (default `["Bash", "PowerShell"]`). Because there is no separate `alternative`
+field here, the `message` SHALL itself state the alternative — contain a form of "use" or
+"instead" — and SHALL NOT be empty; either failure, and an unknown key, SHALL be refused on
+load with an error naming the rule. Inline rules SHALL be appended after every built-in and
+`extra`-file rule, so with an overlapping pattern an earlier rule wins, and SHALL otherwise
+evaluate with the same block/allow semantics and the same exit code as any other rule.
+
+#### Scenario: Custom rule declared inline in ratchet.toml blocks
+- **WHEN** `ratchet.toml` declares `[[guardrails.rules]]` with `name = "no-curl"`, `match = '^\s*curl\b'`, `message = "Use the repo's fetch script instead."` and the tool call is `curl https://example.com`
+- **THEN** the hook blocks with rule `no-curl` and that message
+
+#### Scenario: Inline custom rule evaluates after the built-ins
+- **WHEN** the repo also declares an inline `[[guardrails.rules]]` entry named `catch-all-force` whose `match` also matches `git push --force`, and the tool call is `git push --force origin main`
+- **THEN** the hook blocks with the built-in rule `git-destructive`, not `catch-all-force`
+
+#### Scenario: Inline custom rule with an unknown key is refused
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry with a key outside `name`, `match`, `message` and `tools`
+- **THEN** `ratchet guardrails list` exits 1 and stderr names `ratchet.toml`
+
+#### Scenario: Inline custom rule with an empty message is refused
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry whose `message` is empty
+- **THEN** `ratchet guardrails list` exits 1 and stderr names the rule
+
+#### Scenario: Inline custom rule with no stated alternative is refused
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry whose `message` says neither "use" nor "instead"
+- **THEN** `ratchet guardrails list` exits 1 and stderr names the rule
+
 #### Scenario: Python outside the venv
 - **WHEN** the tool call is `python scripts/x.py` through `Bash` in a repo with `.venv`
 - **THEN** the hook blocks with rule `python-venv` and the message proposes `uv run`
@@ -235,9 +265,11 @@ session's own tasks in progress with their last handoff; the repo's tasks in pro
 sessions that died, with their last handoff; up to five tasks ready to take, ordered by priority;
 and one line naming the commands and the skill with the full guide. When the repo has none of those
 tasks, the briefing SHALL be a single line, plus the map freshness line when the map capability has
-one to show (see `openspec/specs/map/spec.md`). The briefing SHALL be built before the work of dead
-sessions is returned to the queue, so an orphaned task is shown once with its handoff before it goes
-back.
+one to show (see `openspec/specs/map/spec.md`). When the repo has an `AGENTS.md` at its root, the
+briefing SHALL add exactly one more line, `rules: AGENTS.md`, right after the header — pointing at
+the file, never restating it (owner decision: a repo's own rules live in `AGENTS.md`, nowhere
+else). The briefing SHALL be built before the work of dead sessions is returned to the queue, so an
+orphaned task is shown once with its handoff before it goes back.
 
 #### Scenario: Briefing with orphans and ready tasks
 - **WHEN** a session starts in a repo with one task held by a dead session and three ready to take
@@ -245,11 +277,19 @@ back.
 
 #### Scenario: No tasks, one line
 - **WHEN** a session starts in a repo with no tasks in progress, none orphaned and none ready
-- **THEN** the briefing is exactly one line, with the repo, the session and the branch, apart from the map freshness line
+- **THEN** the briefing is exactly one line, with the repo, the session and the branch, apart from the map freshness line and the rules line
 
 #### Scenario: The briefing never exceeds forty lines
 - **WHEN** a session starts in a repo with far more tasks than fit
 - **THEN** the briefing is at most 40 lines, the last two say where to see the rest and name the commands, and nothing is cut mid-line
+
+#### Scenario: Repo rules line when AGENTS.md exists
+- **WHEN** a session starts in a repo with no tasks in progress, none orphaned and none ready, and the repo has an `AGENTS.md` at its root
+- **THEN** the briefing's second line is exactly `rules: AGENTS.md`, and the file is not otherwise mentioned
+
+#### Scenario: No rules line when AGENTS.md is absent
+- **WHEN** a session starts in a repo with no `AGENTS.md` at its root
+- **THEN** the briefing has no line mentioning `AGENTS.md`
 
 ### Requirement: Task reminder on every prompt
 On every user prompt in an opted-in repo, if the session holds a task in progress, the hook SHALL

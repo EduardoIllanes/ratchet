@@ -100,6 +100,47 @@ fn agent_protocol__the_briefing_never_exceeds_forty_lines() {
     );
 }
 
+#[test]
+fn agent_protocol__repo_rules_line_when_agents_md_exists() {
+    let sb = sandbox();
+    sb.write("AGENTS.md", "# repo rules live here\n");
+    let root = sb.root();
+    let out = hook_env(
+        &sb,
+        "session-start",
+        &session_payload("s-rules", &root),
+        &root,
+        &[("RATCHET_NOW", T0)],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let printed = lines(&out);
+    assert_eq!(printed[1], "rules: AGENTS.md", "{printed:?}");
+    assert_eq!(
+        stdout(&out).matches("AGENTS.md").count(),
+        1,
+        "the briefing points at the file once, it does not restate it: {printed:?}"
+    );
+}
+
+#[test]
+fn agent_protocol__no_rules_line_when_agents_md_is_absent() {
+    let sb = sandbox();
+    let root = sb.root();
+    let out = hook_env(
+        &sb,
+        "session-start",
+        &session_payload("s-norules", &root),
+        &root,
+        &[("RATCHET_NOW", T0)],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(
+        !stdout(&out).contains("AGENTS.md"),
+        "unexpected rules line: {:?}",
+        lines(&out)
+    );
+}
+
 // --- Requirement: Task reminder on every prompt ---------------------------------------------
 
 #[test]
