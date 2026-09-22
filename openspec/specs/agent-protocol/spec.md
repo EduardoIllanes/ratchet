@@ -158,6 +158,44 @@ changed, and SHALL stay within the hook's time budget: at most one `git status` 
 - **WHEN** the post-tool hook runs for a `Bash` call whose PreToolUse never recorded a snapshot for this session
 - **THEN** stdout and stderr are empty and exit 0
 
+### Requirement: Big reads go to a cheap reader, not into the orchestrator's context
+In PreToolUse inside an opted-in repo, the built-in rule `big-read` SHALL block a `Read` whose
+`file_path` is a regular file of more than `[guardrails] big_read_lines` lines (default 350)
+when the call gives neither `offset` nor `limit`, and SHALL block a `Bash`/`PowerShell`
+segment whose command is `cat`, `head`, `tail`, `less` or `more` over such a file when the
+segment is not part of a pipe. The message SHALL name three alternatives: `Read` with
+`offset` and `limit`, the `reader` agent with the file and a question, and `grep` for the
+lines wanted. The rule SHALL NOT apply to a file inside the repo's worktrees directory (that is
+where implementers read whole files), to a file that does not exist, or to a segment with a
+pipe. Like every built-in it SHALL be disableable by id and its threshold SHALL be
+overridable per repo. Counting lines SHALL cost one read of the file and SHALL not run for
+files under the threshold size in bytes (`big_read_lines × 16`), so the hot path stays under
+the latency ceiling.
+
+#### Scenario: Read of a big main-tree file blocked
+- **WHEN** a `Read` targets a tracked main-tree file of 400 lines with no `offset` or `limit`
+- **THEN** the hook blocks with rule `big-read` and the message names `offset`, `limit` and the `reader` agent
+
+#### Scenario: Read with a window allowed
+- **WHEN** a `Read` targets the same 400-line file with `limit: 80`
+- **THEN** the hook allows it
+
+#### Scenario: Small file allowed
+- **WHEN** a `Read` targets a file of 349 lines with no window
+- **THEN** the hook allows it
+
+#### Scenario: cat of a big file blocked, piped cat allowed
+- **WHEN** the tool call is `cat src/big.rs` through `Bash` where `src/big.rs` has 400 lines
+- **THEN** the hook blocks with rule `big-read`, while `cat src/big.rs | grep fn` and `head -40 src/big.rs | cat` are allowed
+
+#### Scenario: Big file inside a worktree allowed
+- **WHEN** a `Read` targets a 400-line file under the repo's worktrees directory with no window
+- **THEN** the hook allows it
+
+#### Scenario: Threshold overridden per repo
+- **WHEN** `ratchet.toml` sets `big_read_lines = 1000` under `[guardrails]` and a `Read` targets a 400-line main-tree file with no window
+- **THEN** the hook allows it, and with `big_read_lines = 100` it blocks
+
 ### Requirement: Hooks never break a session
 On any internal error (invalid config, malformed payload, unexpected failure) a hook SHALL
 exit 0 without blocking and SHALL append one line to the log file under the state
