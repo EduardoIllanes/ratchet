@@ -18,6 +18,7 @@ pub enum Kind {
     FilePath,
     Content,
     MainTree,
+    BigRead,
 }
 
 impl Kind {
@@ -28,6 +29,7 @@ impl Kind {
             Kind::FilePath => "file_path",
             Kind::Content => "content",
             Kind::MainTree => "main_tree",
+            Kind::BigRead => "big_read",
         }
     }
 }
@@ -102,7 +104,7 @@ pub fn parse_rules(text: &str, path: &Path, source: &str) -> Result<Vec<Rule>, C
                 })?;
             }
         }
-        if r.kind != Kind::MainTree && r.pattern.is_none() {
+        if r.kind != Kind::MainTree && r.kind != Kind::BigRead && r.pattern.is_none() {
             return Err(ConfigError {
                 path: path.to_path_buf(),
                 message: format!(
@@ -172,11 +174,17 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn builtins_have_the_four_ids_in_order() {
+    fn builtins_have_the_five_ids_in_order() {
         let ids: Vec<String> = builtin_rules().into_iter().map(|r| r.id).collect();
         assert_eq!(
             ids,
-            vec!["python-venv", "git-destructive", "env-files", "main-tree"]
+            vec![
+                "python-venv",
+                "git-destructive",
+                "env-files",
+                "main-tree",
+                "big-read"
+            ]
         );
         assert!(builtin_rules().iter().all(|r| r.source == "builtin"));
     }
@@ -215,6 +223,7 @@ mod tests {
                 "git-destructive",
                 "env-files",
                 "main-tree",
+                "big-read",
                 "custom"
             ]
         );
@@ -229,6 +238,9 @@ mod tests {
             off: vec!["python-venv".into()],
         };
         let ids: Vec<&str> = set.active().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, vec!["git-destructive", "env-files", "main-tree"]);
+        assert_eq!(
+            ids,
+            vec!["git-destructive", "env-files", "main-tree", "big-read"]
+        );
     }
 }

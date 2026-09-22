@@ -28,6 +28,12 @@ agent should use, so it corrects itself in one attempt instead of improvising.
 - **mapper** describes header-less files for `ratchet map`, one sentence each, through
   `ratchet map note` — the only file it ever touches is `.ratchet/map.notes`, and only through
   that command, never by editing it directly.
+- **reader** is the built-in `big-read` guardrail's answer to "then how do I read it": a file
+  over the line threshold, or a bare `cat`/`head`/`tail`/`less`/`more` of one, is blocked with
+  three ways out — `Read` with `offset`/`limit`, `grep` for the lines wanted, or this agent. Big
+  files are read by a cheap reader with a question, never by the orchestrator: it runs on
+  `haiku` at low effort, takes a file (or files) plus a question, and answers in structured
+  bullets only — no prose, and it never edits.
 
 An orchestrating session dispatches them and reads their reports; it does not implement. That
 is the only way its context stays useful at the end of the day.

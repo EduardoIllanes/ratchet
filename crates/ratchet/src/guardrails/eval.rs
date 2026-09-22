@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use fancy_regex::Regex;
 use serde_json::Value;
 
+use super::big_read::blocks_big_read;
 use super::main_tree::writes_main_tree;
 use super::rules::{Kind, Rule};
 use super::segment::segments;
@@ -25,6 +26,9 @@ pub struct GuardContext {
     pub cwd: PathBuf,
     pub has_venv: bool,
     pub scratchpad: Option<PathBuf>,
+    /// `[guardrails] big_read_lines` (default `config::DEFAULT_BIG_READ_LINES`): the line-count
+    /// threshold the `big-read` rule blocks over.
+    pub big_read_lines: usize,
 }
 
 // render() is consumed by Task 9 (hooks::dispatch) to print the block message.
@@ -87,6 +91,9 @@ fn matches(rule: &Rule, tool_name: &str, tool_input: &Value, ctx: &GuardContext)
     if rule.kind == Kind::MainTree {
         return writes_main_tree(tool_name, tool_input, ctx);
     }
+    if rule.kind == Kind::BigRead {
+        return blocks_big_read(tool_name, tool_input, ctx);
+    }
     let text = text_for(rule.kind, tool_input);
     let text = cap(&text);
     let Some(pattern) = rule.pattern.as_deref().and_then(compile) else {
@@ -147,12 +154,16 @@ fn text_for(kind: Kind, tool_input: &Value) -> String {
                 fp.to_string()
             }
         }
-        Kind::Content | Kind::MainTree => ["command", "content", "new_string", "new_source"]
-            .iter()
-            .map(|k| get(k))
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
+        // MainTree/BigRead never reach here: `matches()` dispatches both to their own module
+        // before falling through to this pattern-based path.
+        Kind::Content | Kind::MainTree | Kind::BigRead => {
+            ["command", "content", "new_string", "new_source"]
+                .iter()
+                .map(|k| get(k))
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
     }
 }
 
@@ -197,6 +208,7 @@ mod tests {
             cwd: PathBuf::from("C:/r"),
             has_venv,
             scratchpad,
+            big_read_lines: crate::config::DEFAULT_BIG_READ_LINES,
         }
     }
 

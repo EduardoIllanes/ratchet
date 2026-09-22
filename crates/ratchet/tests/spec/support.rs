@@ -169,6 +169,36 @@ pub fn write(file_path: &Path, content: &str, cwd: &Path) -> Value {
     json!({ "tool_name": "Write", "tool_input": { "file_path": file_path.to_string_lossy(), "content": content }, "cwd": cwd.to_string_lossy() })
 }
 
+/// Turns a `bash`/`powershell` pre-tool payload into its matching PostToolUse payload: same
+/// `tool_name`, `tool_input` and `cwd`, plus an empty `tool_response`.
+pub fn post_tool(payload: &Value) -> Value {
+    let mut v = payload.clone();
+    v.as_object_mut()
+        .unwrap()
+        .insert("tool_response".to_string(), json!({}));
+    v
+}
+
+/// A `Read` call with no window (no `offset`, no `limit`).
+pub fn read(file_path: &Path, cwd: &Path) -> Value {
+    json!({ "tool_name": "Read", "tool_input": { "file_path": file_path.to_string_lossy() }, "cwd": cwd.to_string_lossy() })
+}
+
+/// A `Read` call with an explicit window. Either bound may be omitted (`None`); the
+/// corresponding key is left out of `tool_input` rather than sent as `null`, matching what
+/// Claude Code itself sends.
+pub fn read_window(file_path: &Path, offset: Option<i64>, limit: Option<i64>, cwd: &Path) -> Value {
+    let mut input = serde_json::Map::new();
+    input.insert("file_path".to_string(), json!(file_path.to_string_lossy()));
+    if let Some(o) = offset {
+        input.insert("offset".to_string(), json!(o));
+    }
+    if let Some(l) = limit {
+        input.insert("limit".to_string(), json!(l));
+    }
+    json!({ "tool_name": "Read", "tool_input": Value::Object(input), "cwd": cwd.to_string_lossy() })
+}
+
 pub fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).to_string()
 }
@@ -223,6 +253,16 @@ pub fn session_payload(session_id: &str, cwd: &Path) -> Value {
 /// The linked worktree the sandbox creates.
 pub fn worktree(sb: &Sandbox) -> PathBuf {
     sb.root().join(".worktrees").join("wt")
+}
+
+/// Adds `rel` as a newly tracked (committed) file in `sb`'s main tree, so a test can exercise a
+/// guardrail shape against a tracked path other than the fixture's default `tracked.txt`.
+pub fn track_file(sb: &Sandbox, rel: &str, body: &str) -> PathBuf {
+    let p = sb.write(rel, body);
+    let root = sb.root();
+    git(&root, &["add", rel]);
+    git(&root, &["commit", "-q", "-m", &format!("track {rel}")]);
+    p
 }
 
 /// Key the binary stores in `repo_root`: the main root, absolute and lower-cased.
@@ -645,6 +685,22 @@ pub fn payloads_of(sb: &Sandbox, task_id: &str, kind: &str) -> Vec<String> {
         .unwrap();
     let rows = stmt
         .query_map(rusqlite::params![task_id, kind], |r| r.get::<_, String>(0))
+        .unwrap();
+    rows.map(|r| r.unwrap()).collect()
+}
+
+/// Raw payloads of a session's events of one kind, oldest first (mirrors `payloads_of`, which
+/// is keyed by task instead of session — used for events, like a guardrail record, that belong
+/// to a session rather than a task).
+pub fn session_event_payloads(sb: &Sandbox, session_id: &str, kind: &str) -> Vec<String> {
+    let conn = db(sb);
+    let mut stmt = conn
+        .prepare("SELECT payload FROM events WHERE session_id = ?1 AND kind = ?2 ORDER BY id")
+        .unwrap();
+    let rows = stmt
+        .query_map(rusqlite::params![session_id, kind], |r| {
+            r.get::<_, String>(0)
+        })
         .unwrap();
     rows.map(|r| r.unwrap()).collect()
 }

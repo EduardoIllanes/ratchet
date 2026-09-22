@@ -164,6 +164,54 @@ pub fn is_tracked(main_root: &Path, target: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Tracked files `git status --porcelain --untracked-files=no` reports as changed at
+/// `main_root`, as paths relative to it (a rename's path is its new name). The one subprocess
+/// the main-tree post-check spends its "at most one `git status` per hook" budget on. Any
+/// failure (git missing, not a repository) answers no changes rather than erroring, matching
+/// every other best-effort read in this module.
+pub fn status_paths(main_root: &Path) -> Vec<String> {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            &main_root.to_string_lossy(),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .stderr(Stdio::null())
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            // Porcelain format: two status characters, a space, then the path (renames add
+            // " -> new/path"; we only care about the resulting path).
+            if line.len() < 4 {
+                return None;
+            }
+            let rest = &line[3..];
+            let path = match rest.split_once(" -> ") {
+                Some((_old, new)) => new,
+                None => rest,
+            };
+            let path = path.trim().trim_matches('"');
+            if path.is_empty() {
+                None
+            } else {
+                Some(path.to_string())
+            }
+        })
+        .collect()
+}
+
 /// Branch checked out at `cwd`, when git can tell. A detached HEAD and any failure answer `None`.
 /// Never reached from `pre-tool`: only the session hooks call it, once per session start.
 pub fn git_branch(cwd: &Path) -> Option<String> {
@@ -352,5 +400,27 @@ mod tests {
             .map(|c| c.as_os_str().to_string_lossy().to_string())
             .collect();
         assert_eq!(parts, vec!["Mixed", "CaseFile.txt"]);
+    }
+
+    #[test]
+    fn status_paths_reports_only_tracked_changes() {
+        let d = tempfile::TempDir::new().unwrap();
+        let root = d.path();
+        git(root, &["init", "-q"]);
+        fs::write(root.join("tracked.txt"), "x").unwrap();
+        git(root, &["add", "tracked.txt"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+        assert!(status_paths(root).is_empty());
+
+        fs::write(root.join("tracked.txt"), "y").unwrap();
+        fs::write(root.join("untracked.txt"), "z").unwrap();
+        let paths = status_paths(root);
+        assert_eq!(paths, vec!["tracked.txt".to_string()]);
+    }
+
+    #[test]
+    fn status_paths_on_a_non_repository_is_empty() {
+        let d = tempfile::TempDir::new().unwrap();
+        assert!(status_paths(d.path()).is_empty());
     }
 }
