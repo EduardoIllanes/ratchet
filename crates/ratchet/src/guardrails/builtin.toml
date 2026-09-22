@@ -39,3 +39,10 @@ tools = ["Edit", "Write", "NotebookEdit", "MultiEdit", "Bash", "PowerShell"]
 kind = "main_tree"
 message = "Write to a tracked file in the repo's main tree."
 alternative = "Work in a worktree (`git worktree add <worktrees_dir>/<name> -b <branch>`) and edit there."
+
+[[rules]]
+id = "big-read"
+tools = ["Read", "Bash", "PowerShell"]
+kind = "big_read"
+message = "A file this big belongs to a cheap reader, not the orchestrator's own context."
+alternative = "Use `Read` with `offset`/`limit` for a window, dispatch the `reader` agent with the file and a question, or `grep` for the lines you actually want."

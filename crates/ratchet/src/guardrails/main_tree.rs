@@ -221,6 +221,7 @@ mod tests {
             cwd: d.path().to_path_buf(),
             has_venv: false,
             scratchpad: None,
+            big_read_lines: crate::config::DEFAULT_BIG_READ_LINES,
         };
         (d, ctx)
     }

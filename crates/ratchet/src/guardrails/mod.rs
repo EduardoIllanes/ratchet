@@ -1,3 +1,4 @@
+pub mod big_read;
 pub mod cli;
 pub mod eval;
 pub mod main_tree;

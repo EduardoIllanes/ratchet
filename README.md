@@ -124,7 +124,7 @@ Without that file, every hook is a no-op.
 ## Guardrails
 
 
-Built-in: `python-venv`, `git-destructive`, `env-files`, `main-tree`. Disable per repo with
+Built-in: `python-venv`, `git-destructive`, `env-files`, `main-tree`, `big-read`. Disable per repo with
 `[guardrails] off = ["id"]`. Add your own with the same schema, machine-wide in
 `~/.ratchet/config.toml` → `[guardrails] extra = "guardrails.toml"`, or per repo in
 `ratchet.toml` → `[guardrails] extra = "ratchet/guardrails.toml"`. A rule with an existing id
@@ -142,6 +142,18 @@ write-method names of your own driver in the pattern):
 Known behaviour, by design: command rules split on `;` only outside quotes, so a quoted
 `"done; mypy clean"` does not trip `python-venv`; but a `content` rule scans what will be
 written, so quoting a blocked pattern in documentation blocks that write too.
+
+`big-read` keeps a whole big file out of the orchestrator's own context: a `Read` with no
+`offset`/`limit`, or a bare `cat`/`head`/`tail`/`less`/`more`, over a regular file of more than
+`[guardrails] big_read_lines` lines (default 350) is blocked, naming three ways out — `Read`
+with a window, `grep` for the lines wanted, or the `reader` agent (`haiku`, low effort) with the
+file and a question. It exempts a file under the repo's worktrees directory (that is where
+implementers read whole files on purpose), a file that does not exist, and a piped command
+(`cat big.rs | grep fn` already filters before anything reaches the transcript). Override the
+threshold per repo:
+
+    [guardrails]
+    big_read_lines = 800
 
 ## The board
 
@@ -252,8 +264,9 @@ is not planned — it stays in `ops`, where it already runs daily (owner decisio
 ## Agents and skills
 
 
-Six agent profiles in `agents/`: `analyst`, `spec-test-author`, `implementer`, `reviewer`,
-`refactorer`, `researcher` — see `docs/agent-doctrine.md` for how they are meant to be combined. Two skills:
+Seven agent profiles in `agents/`: `analyst`, `spec-test-author`, `implementer`, `reviewer`,
+`refactorer`, `researcher`, `reader` — see `docs/agent-doctrine.md` for how they are meant to be
+combined. Two skills:
 `ratchet-tasks` (working the board, writing handoffs) and `ratchet-pdf` (extracting text from a
 local PDF). The OpenSpec skills (`openspec-propose`, `-apply-change`, `-update-change`,
 `-sync-specs`, `-archive-change`, `-explore`) and the `/opsx:*` commands are included as-is

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::config::ratchet_home;
+use crate::config::{ratchet_home, DEFAULT_BIG_READ_LINES};
 use crate::guardrails::eval::{evaluate, scratchpad_from_env, GuardContext};
 use crate::guardrails::rules::load_rule_set;
 use crate::repo::{find_repo, has_venv, Repo};
@@ -88,6 +88,10 @@ pub fn test(tool: &str, payload: &str, env: &HashMap<String, String>, cwd: Optio
             .unwrap_or(false),
         cwd,
         scratchpad: scratchpad_from_env(env),
+        big_read_lines: repo
+            .as_ref()
+            .map(|r| r.config.guardrails.big_read_lines)
+            .unwrap_or(DEFAULT_BIG_READ_LINES),
     };
     let rules: Vec<_> = set.active().collect();
     match evaluate(&rules, tool, &tool_input, &ctx) {

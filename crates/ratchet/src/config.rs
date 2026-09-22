@@ -29,13 +29,30 @@ pub struct RepoSection {
     pub worktrees_dir: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+/// Default for `[guardrails] big_read_lines`: a `Read` without a window, or a bare
+/// `cat`/`head`/`tail`/`less`/`more`, over a regular file with more lines than this is blocked
+/// by the built-in `big-read` rule.
+pub const DEFAULT_BIG_READ_LINES: usize = 350;
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct GuardrailsSection {
     /// Ids of rules disabled in this repo.
     pub off: Vec<String>,
     /// Path, relative to the main root, of a rules file with the built-in schema.
     pub extra: Option<String>,
+    /// Line-count threshold for the built-in `big-read` rule.
+    pub big_read_lines: usize,
+}
+
+impl Default for GuardrailsSection {
+    fn default() -> Self {
+        Self {
+            off: Vec::new(),
+            extra: None,
+            big_read_lines: DEFAULT_BIG_READ_LINES,
+        }
+    }
 }
 
 /// Upper bound for a threshold read from `ratchet.toml`, in minutes: 100 years
@@ -195,6 +212,7 @@ mod tests {
         let c = parse_repo_config("", Path::new("ratchet.toml")).unwrap();
         assert_eq!(c.repo.worktrees_dir, None);
         assert!(c.guardrails.off.is_empty());
+        assert_eq!(c.guardrails.big_read_lines, DEFAULT_BIG_READ_LINES);
         assert_eq!(c.thresholds.live_minutes, 10);
         assert_eq!(c.thresholds.idle_minutes, 60);
     }
@@ -207,7 +225,20 @@ mod tests {
         assert_eq!(c.repo.worktrees_dir.as_deref(), Some(".wt"));
         assert_eq!(c.guardrails.off, vec!["python-venv"]);
         assert_eq!(c.guardrails.extra.as_deref(), Some("ratchet/g.toml"));
+        assert_eq!(
+            c.guardrails.big_read_lines, DEFAULT_BIG_READ_LINES,
+            "omitted from this repo's [guardrails] table: falls back to the default"
+        );
         assert_eq!(c.thresholds.live_minutes, 3);
+    }
+
+    #[test]
+    fn big_read_lines_is_overridable_and_defaults_when_absent() {
+        let text = "[guardrails]\nbig_read_lines = 1000\n";
+        let c = parse_repo_config(text, Path::new("ratchet.toml")).unwrap();
+        assert_eq!(c.guardrails.big_read_lines, 1000);
+        let c = parse_repo_config("[guardrails]\noff = []\n", Path::new("ratchet.toml")).unwrap();
+        assert_eq!(c.guardrails.big_read_lines, DEFAULT_BIG_READ_LINES);
     }
 
     #[test]

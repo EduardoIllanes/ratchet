@@ -1,6 +1,6 @@
 # Agent doctrine
 
-ratchet ships six agent profiles and two working rules. The rules are what make the profiles
+ratchet ships seven agent profiles and two working rules. The rules are what make the profiles
 worth having.
 
 ## Rule 1: guardrails live in the harness, not in the prompt
@@ -25,6 +25,12 @@ agent should use, so it corrects itself in one attempt instead of improvising.
   A behaviour change it would need is reported as a proposal, not made.
 - **analyst** answers read-only questions (spec vs code, design comparisons) as board notes.
 - **researcher** extracts text from local PDFs with `ratchet pdf` and answers with citations.
+- **reader** is the built-in `big-read` guardrail's answer to "then how do I read it": a file
+  over the line threshold, or a bare `cat`/`head`/`tail`/`less`/`more` of one, is blocked with
+  three ways out — `Read` with `offset`/`limit`, `grep` for the lines wanted, or this agent. Big
+  files are read by a cheap reader with a question, never by the orchestrator: it runs on
+  `haiku` at low effort, takes a file (or files) plus a question, and answers in structured
+  bullets only — no prose, and it never edits.
 
 An orchestrating session dispatches them and reads their reports; it does not implement. That
 is the only way its context stays useful at the end of the day.

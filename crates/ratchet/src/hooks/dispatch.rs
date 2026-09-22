@@ -98,6 +98,7 @@ pub fn pre_tool(
         cwd: cwd.to_path_buf(),
         has_venv: has_venv(cwd, &repo.main_root),
         scratchpad: scratchpad_from_env(env),
+        big_read_lines: repo.config.guardrails.big_read_lines,
     };
     let rules: Vec<_> = set.active().collect();
     match evaluate(&rules, &payload.tool_name, &payload.tool_input, &ctx) {
