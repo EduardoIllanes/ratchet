@@ -1,6 +1,6 @@
 # Agent doctrine
 
-ratchet ships seven agent profiles and two working rules. The rules are what make the profiles
+ratchet ships eight agent profiles and two working rules. The rules are what make the profiles
 worth having.
 
 ## Rule 1: guardrails live in the harness, not in the prompt
@@ -18,7 +18,8 @@ agent should use, so it corrects itself in one attempt instead of improvising.
   one is impossible or contradictory it stops and reports.
 - **reviewer** reads the diff against the spec, the checklist and the handoff, runs
   adversarial probes for real (always with doubles), runs the gate, and hunts side effects
-  outside the declared scope. It describes a blocking finding; it never fixes it.
+  outside the declared scope. It describes a blocking finding; it never fixes it. Its verdict is
+  recorded, not narrated — see "Hard stops" below.
 - **refactorer** changes how code reads, never what it does: runs the gate before touching
   anything, works in small steps with the gate after each, reverts a step that goes red, and
   deletes only code with no reference in the crate and no mention in README, specs or skills.
@@ -38,6 +39,41 @@ agent should use, so it corrects itself in one attempt instead of improvising.
 An orchestrating session dispatches them and reads their reports; it does not implement. That
 is the only way its context stays useful at the end of the day.
 
+## Hard stops: what a worker with no hooks checks by hand
+
+A tool with hooks (PreToolUse, Stop) gets some of this enforced for it. A tool without hooks
+gets nothing for free — this checklist is what the hooks would have done, with the exact
+`ratchet` command for each. This list exists because skipping it once already produced a
+self-reviewed, placeholder-shipping, branch-left-red change (T-0006, 2026-09-22).
+
+- [ ] **Session start**: `ratchet task list` and read the last handoff of anything you hold or
+      are about to take. Never start blind to what the last session said.
+- [ ] **Claim**: `ratchet task claim <id>` before touching a file for that task. An unclaimed
+      task has no session to hold it accountable.
+- [ ] **Progress**: `ratchet task check <id> <n>` the moment a checklist item is actually met,
+      and `ratchet task note "…"` for every non-obvious decision — before you act on it, not
+      after.
+- [ ] **Before `status <id> review`**: run the gate (`cargo fmt --check`, `cargo clippy
+      --all-targets -- -D warnings`, `cargo test`, or whatever the repo documents) on the
+      **target branch, after merging your work into it** — not only inside your worktree. A
+      worktree can be green while the branch it merges into is red.
+- [ ] **The review is never your own note.** `ratchet task note` from the session that did the
+      work is not a review. An independent reviewer — a different session, its own
+      `--session` — records the verdict: `ratchet task review <id> approve "…"` or
+      `ratchet task review <id> changes "…"`.
+- [ ] **Before `status <id> done`**: an `approve` verdict from that independent session must
+      already exist. The CLI refuses `done` on its own when it is missing, naming what to run —
+      the check here is so you never find that out from a refusal mid-close.
+- [ ] **Nothing named `scratch`, `probe`, or `placeholder` is committed.** A probe lives in the
+      job's temp directory or the session scratchpad, never in the repo, never in a commit.
+- [ ] **End**: `ratchet task handoff <id> "…"` — what is left, where the work is, what not to
+      do, how to resume. A session that closes an `in_progress` task with nothing recorded
+      leaves the next one guessing.
+
+The owner alone may skip the review with `ratchet task status <id> done --unreviewed`; it still
+requires a complete checklist, and it leaves a note on the board saying so. Nobody else uses it —
+the point of the checklist above is that nobody needs to.
+
 ## How a task moves
 
 ```
@@ -45,7 +81,7 @@ backlog → ready → in_progress → review → done        (blocked is a side 
 ```
 
 - Progress is derived from the checklist. Nobody declares "60 % done".
-- Every state change, check, note and handoff is an append-only event.
+- Every state change, check, note, review verdict and handoff is an append-only event.
 - A session that ends with an `in_progress` task and no record from that turn is asked, once,
   for a handoff. A handoff says what is left, where the work is, what not to do, and how to
   resume.

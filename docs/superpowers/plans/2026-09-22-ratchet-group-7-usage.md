@@ -1996,9 +1996,10 @@ pub fn average_totals(items: &[Totals]) -> Totals {
     }
 }
 
-/// One `subagent.start`/`subagent.stop` event, already extracted from `events.payload` by the
-/// caller (Assumption 1 at the top of this plan): `agent_id`/`agent_type`/`description`/`task`
-/// all come from the payload, not from the event row's own columns.
+/// One `subagent.start`/`subagent.stop` event, already extracted by the caller (Assumption 1 at
+/// the top of this plan): `agent_id`/`agent_type`/`description` come from `events.payload`;
+/// `task` comes from the event row's own `task_id` column, never from the payload (which has
+/// no `task_id` field).
 // Consumed by cli::usage_cmd (Task 4).
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -2607,8 +2608,11 @@ cargo fmt --all -- --check
 
 - [ ] **Step 1: Wire `Cmd::Usage` through `main.rs` and `cli/mod.rs`**
 
-Add the variant and arm following `Cmd::Map` line for line (same `--session` handling, same
-`Face`-less thin dispatch: parse args, call `usage_cmd::run`, return its code). No logic in
+Add the variant and arm following `Cmd::Map` line for line (same `Face`-less thin dispatch:
+parse args, call `usage_cmd::run`, return its code). Unlike `Map`, the arm passes the global
+`Cli.session` (`session.as_deref()`) into `usage_cmd::run`, exactly as the `Cmd::Task` arm does,
+because Task 5's `--note` attributes its write through `sessions::resolve` (explicit `--session`
+> `RATCHET_SESSION_ID` > directory) and Task 5 may not touch `main.rs`. No other logic in
 `main.rs` beyond the arm — a reviewer diffs this step in under a minute.
 
 - [ ] **Step 2: Write the collection pass (`collect`)**
@@ -2627,9 +2631,13 @@ Resolution order inside `collect`, with no exceptions:
 1. Projects dir: `RATCHET_CLAUDE_PROJECTS` when set and non-empty, else
    `~/.claude/projects`. A missing directory is scenario 3's error and names the path —
    fail before touching the database.
-2. Open the database with `db::open` (reads only — NEVER `db::connect`, which migrates, and
-   NEVER `events::emit`: scenario 26 asserts zero new rows and zero files changed).
-3. Sessions: `sessions::list` filtered to this repo's root, unless `--all-repos`.
+2. Open the database with `db::open_ready(home)` — the read-only opener every sibling face uses
+   (`task_cmd.rs`, `session_cmd.rs`); NEVER `db::open`, which creates a schemaless file when
+   none exists, NEVER `db::connect`, which migrates, and NEVER `events::emit`: scenario 26
+   asserts zero new rows and zero files changed.
+3. Sessions: `sessions::list(conn, repo_name)` for this repo, unless `--all-repos`. Note it
+   filters by the repo's display name (the `repo` column), not by `repo_root` — pass the name
+   `find_repo` resolves, as `session_cmd.rs` does.
 4. Per session: `transcript::transcript_path` → missing file counts one `skipped` entry with
    the `no transcript` substring (scenario 2) and moves on; present file → `parse`, folding
    `ParseResult` counts into `partial` and skipping empty results with one `skipped` entry
@@ -2652,10 +2660,14 @@ Resolution order inside `collect`, with no exceptions:
     `rounds_tokens`), and the four token classes abbreviated (`abbreviate` — the `k`/`M`
     substrings of scenario 22 come from here, never from ad-hoc formatting).
   - `usage <id>`: one line per role × model (`totals_by_role_model`, role via
-    `display_role`), then `orientation` (`orientation`), `rounds` (`rounds_tokens`),
-    orchestrator share (`orchestrator_share`), cache efficiency (`cache_efficiency`).
+    `display_role`), then `orientation` — computed per session with `orientation` and shown as
+    `average_totals` over the task's sessions (Requirement 4; no scenario gives a task two
+    sessions, so add a unit test in `usage_cmd.rs` with two sessions whose orientation differs
+    and assert the average, never the sum) — then `rounds` (`rounds_tokens`), orchestrator
+    share (`orchestrator_share`), cache efficiency (`cache_efficiency`).
   - `--by task|role|model|session`: `group_totals` across the window; the role shape appends
-    `review rounds per task` and `orientation per session` (scenario 21's stable substrings).
+    `review rounds per task` and `orientation per session` (scenario 21's stable substrings),
+    the latter again `average_totals` across the sessions in the window.
   - Cost column (listing and buckets): `task_cost` / `weights::cost` — present only when
     weights matched (scenarios 16–18); a non-matching model hides the whole column, never a
     partial sum (Assumption 4).

@@ -23,7 +23,9 @@ through the `ratchet` CLI (the plugin puts it on your path; `ratchet --help` lis
 5. **Before ending your reply**: if the task is still `in_progress` and you recorded nothing this
    turn, the Stop hook will ask for a handoff once. Write a good one (below).
 6. **Close**: `ratchet task status T-0042 review` (or `done` when the checklist is complete;
-   without a checklist, `done --why "…"`).
+   without a checklist, `done --why "…"`). `done` refuses without an independent review verdict
+   — a different session must first run `ratchet task review T-0042 approve "…"`; the owner
+   alone bypasses this with `--unreviewed`.
 
 ## A useful handoff
 

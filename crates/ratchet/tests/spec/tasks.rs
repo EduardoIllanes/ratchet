@@ -18,7 +18,14 @@ fn tasks__creating_a_task_assigns_the_next_identifier() {
     assert_eq!(
         code(&task(
             &sb,
-            &["status", &first, "done", "--why", "no criteria"],
+            &[
+                "status",
+                &first,
+                "done",
+                "--why",
+                "no criteria",
+                "--unreviewed"
+            ],
             "s-1",
             4
         )),
@@ -127,7 +134,12 @@ fn tasks__done_without_a_checklist_needs_a_reason() {
         "{}",
         stderr(&refused)
     );
-    let accepted = task(&sb, &["status", &id, "done", "--why", "obsolete"], "s-7", 4);
+    let accepted = task(
+        &sb,
+        &["status", &id, "done", "--why", "obsolete", "--unreviewed"],
+        "s-7",
+        4,
+    );
     assert_eq!(code(&accepted), 0, "{}", stderr(&accepted));
     assert_eq!(task_state(&sb, &id).0, "done");
     let payloads = payloads_of(&sb, &id, "task.status");
@@ -369,6 +381,205 @@ fn tasks__an_empty_handoff_is_refused() {
     assert!(payloads_of(&sb, &id, "handoff").is_empty());
 }
 
+// --- Requirement: Review verdicts -------------------------------------------------------------
+
+#[test]
+fn tasks__verdict_recorded() {
+    let sb = board("s-22");
+    let id = new_task(&sb, "to review", &[], "s-22", 1);
+    let out = task(
+        &sb,
+        &[
+            "review",
+            &id,
+            "approve",
+            "looks right",
+            "--session",
+            "s-reviewer",
+        ],
+        "s-22",
+        2,
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let payloads = payloads_of(&sb, &id, "review.verdict");
+    assert_eq!(payloads.len(), 1);
+    assert!(payloads[0].contains("approve"), "{payloads:?}");
+    assert!(payloads[0].contains("looks right"), "{payloads:?}");
+    // Recording a verdict never moves the task.
+    assert_eq!(task_state(&sb, &id).0, "backlog");
+}
+
+// --- Requirement: Done requires an independent review ---------------------------------------
+
+#[test]
+fn tasks__done_refused_with_no_verdict() {
+    let sb = board("s-23");
+    let id = new_task(&sb, "needs review", &["only criterion"], "s-23", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-23", 2)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-23", 3)), 0);
+    let out = task(&sb, &["status", &id, "done"], "s-23", 4);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("no independent review"), "{err}");
+    assert!(err.contains("ratchet task review"), "{err}");
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
+}
+
+#[test]
+fn tasks__done_refused_when_the_approve_came_from_the_holding_session() {
+    let sb = board("s-24");
+    let id = new_task(&sb, "self reviewed", &["only criterion"], "s-24", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-24", 2)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-24", 3)), 0);
+    // No --session override: this verdict is recorded by s-24, which is also the holder.
+    assert_eq!(
+        code(&task(
+            &sb,
+            &["review", &id, "approve", "self-approved"],
+            "s-24",
+            4
+        )),
+        0
+    );
+    let out = task(&sb, &["status", &id, "done"], "s-24", 5);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("no independent review"), "{err}");
+    // The disqualified verdict came from the holder itself, so naming the holder is naming the
+    // verdict's own session here.
+    assert!(err.contains("s-24"), "{err}");
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
+}
+
+#[test]
+fn tasks__done_refused_when_the_approve_came_from_a_session_that_checked_off_an_item() {
+    let sb = board("s-29");
+    let id = new_task(&sb, "history disqualifies", &["only criterion"], "s-29", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-29", 2)), 0);
+    // s-prior never holds the task, but it recorded the checklist.done earlier (e.g. before a
+    // transfer) — close enough to the work to disqualify it as an independent reviewer.
+    assert_eq!(
+        code(&task(
+            &sb,
+            &["check", &id, "1", "--session", "s-prior"],
+            "s-29",
+            3
+        )),
+        0
+    );
+    assert_eq!(
+        code(&task(
+            &sb,
+            &["review", &id, "approve", "fine", "--session", "s-prior"],
+            "s-29",
+            4
+        )),
+        0
+    );
+    let out = task(&sb, &["status", &id, "done"], "s-29", 5);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("no independent review"), "{err}");
+    // The bug this pins: the message must name s-prior, the session that actually recorded the
+    // disqualified verdict — not s-29, the current holder, who never reviewed anything.
+    assert!(err.contains("s-prior"), "{err}");
+    assert!(!err.contains("other than s-29"), "{err}");
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
+}
+
+#[test]
+fn tasks__done_allowed_after_an_approve_from_another_session() {
+    let sb = board("s-25");
+    let id = new_task(&sb, "properly reviewed", &["only criterion"], "s-25", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-25", 2)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-25", 3)), 0);
+    assert_eq!(
+        code(&task(
+            &sb,
+            &[
+                "review",
+                &id,
+                "approve",
+                "clean diff, gate green",
+                "--session",
+                "s-reviewer"
+            ],
+            "s-25",
+            4
+        )),
+        0
+    );
+    let out = task(&sb, &["status", &id, "done"], "s-25", 5);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(task_state(&sb, &id).0, "done");
+}
+
+#[test]
+fn tasks__done_refused_when_a_changes_verdict_is_newer_than_the_approve() {
+    let sb = board("s-26");
+    let id = new_task(&sb, "flip flopped", &["only criterion"], "s-26", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-26", 2)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-26", 3)), 0);
+    assert_eq!(
+        code(&task(
+            &sb,
+            &[
+                "review",
+                &id,
+                "approve",
+                "first pass ok",
+                "--session",
+                "s-reviewer"
+            ],
+            "s-26",
+            4
+        )),
+        0
+    );
+    assert_eq!(
+        code(&task(
+            &sb,
+            &[
+                "review",
+                &id,
+                "changes",
+                "actually, fix the edge case",
+                "--session",
+                "s-reviewer"
+            ],
+            "s-26",
+            5
+        )),
+        0
+    );
+    let out = task(&sb, &["status", &id, "done"], "s-26", 6);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("\"changes\""), "{err}");
+    // Spells out the literal next command, like the other two refusal branches.
+    assert!(err.contains("ratchet task review"), "{err}");
+    assert!(err.contains("approve"), "{err}");
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
+}
+
+#[test]
+fn tasks__unreviewed_succeeds_and_records_the_note() {
+    let sb = board("s-27");
+    let id = new_task(&sb, "owner bypass", &["only criterion"], "s-27", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-27", 2)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-27", 3)), 0);
+    let out = task(&sb, &["status", &id, "done", "--unreviewed"], "s-27", 4);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(task_state(&sb, &id).0, "done");
+    let notes = payloads_of(&sb, &id, "note");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("done without independent review")),
+        "{notes:?}"
+    );
+}
+
 // --- Requirement: Archiving hides, it never deletes -----------------------------------------
 
 #[test]
@@ -390,7 +601,7 @@ fn tasks__an_archived_task_leaves_the_listing() {
     assert_eq!(
         code(&task(
             &sb,
-            &["status", &id, "done", "--why", "shipped"],
+            &["status", &id, "done", "--why", "shipped", "--unreviewed"],
             "s-20",
             3
         )),
