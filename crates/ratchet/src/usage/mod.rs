@@ -3,5 +3,6 @@
 //! filesystem, no clock, no database. See
 //! `docs/superpowers/specs/2026-09-21-ratchet-usage-design.md`.
 
+pub mod attribute;
 pub mod transcript;
 pub mod weights;
