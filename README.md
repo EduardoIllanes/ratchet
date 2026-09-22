@@ -21,8 +21,7 @@ reviewer). Everything is enforced by hooks and one small binary, not by prompt t
 - **Local PDF extraction** (`ratchet pdf`) through the `liteparse` CLI, with automatic OCR
   retry and output kept out of the terminal.
 - **Agent roles, skills and commands.** Seven agent profiles, the `ratchet-tasks` and
-  `ratchet-pdf` skills, the OpenSpec skills with their `/opsx:*` commands, `/ratchet:init` and
-  `/ratchet:map`.
+  `ratchet-pdf` skills, the `/opsx:*` OpenSpec commands, `/ratchet:init` and `/ratchet:map`.
 
 Cost of the hot path: the guardrail hook does 11-13 ms of its own work per tool call (see
 *Latency* at the end).
@@ -267,9 +266,13 @@ is not planned — it stays in `ops`, where it already runs daily (owner decisio
 Eight agent profiles in `agents/`: `analyst`, `spec-test-author`, `implementer`, `reviewer`,
 `refactorer`, `researcher`, `mapper`, `reader` — see `AGENTS.md` for how they are
 meant to be combined. Two skills: `ratchet-tasks` (working the board, writing handoffs) and
-`ratchet-pdf` (extracting text from a local PDF). The OpenSpec skills (`openspec-propose`,
-`-apply-change`, `-update-change`, `-sync-specs`, `-archive-change`, `-explore`) and the
-`/opsx:*` commands are included as-is and need the `openspec` CLI installed separately.
+`ratchet-pdf` (extracting text from a local PDF). OpenSpec work is the six `/opsx:*` commands
+(`propose`, `apply`, `update`, `sync`, `archive`, `explore`) in `commands/opsx/`; they need the
+`openspec` CLI installed separately. Ratchet used to also ship the same six workflows a second
+time as `openspec-*` skills — that duplicate set is gone (T-0011); the `/opsx:*` commands carry
+every instruction the skills had. The standalone `openspec` plugin ships this same command set
+under its own name — do not install it alongside `ratchet`, it only doubles the listing every
+agent pays for on every turn.
 
 ## Map
 
