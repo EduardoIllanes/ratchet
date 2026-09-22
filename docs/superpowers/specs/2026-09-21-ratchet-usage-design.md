@@ -1,6 +1,6 @@
 # ratchet usage — token cost per task, role and model
 
-Date: 2026-09-21. Owner: Eduardo Illanes. Status: design, awaiting owner review. Extends the
+Date: 2026-09-21, updated 2026-09-22. Owner: Eduardo Illanes. Status: design, awaiting owner review. Extends the
 plugin design (`2026-09-16-ratchet-plugin-design.md`) with a task group 7.
 
 ## 1. Purpose
@@ -36,6 +36,12 @@ configure weights), anything that changes how Claude Code records usage.
 - ratchet's session ids are Claude Code's session ids. `events` has `task.claimed` and
   `task.status` (with the new status in the payload) per session with timestamps; `sessions`
   has `cwd`, `started_at`, `ended_at`.
+- Claude Code's `SubagentStart` and `SubagentStop` hook inputs carry `agent_id` and
+  `agent_type` (`SubagentStop` also `exit_status`); `PreToolUse`/`PostToolUse` fired inside a
+  subagent carry the same two fields. The `agent_id` is the `<id>` of `agent-<id>.jsonl`.
+  Group T-0006 records these as `subagent.start` / `subagent.stop` events attributed to the
+  task the parent session held at that moment, with the meta file as fallback for type and
+  description. Sessions recorded before T-0006 have no such events.
 - The format is internal to Claude Code and undocumented. Everything above is treated as
   observed, not promised.
 
@@ -53,11 +59,15 @@ configure weights), anything that changes how Claude Code records usage.
   (`review`, `done`, `blocked`, `ready`) or the session ends. A session holding several tasks
   at once attributes to the most recently claimed. Calls outside any held task go to
   `unassigned` for that session.
-- **D-usage-subagents.** A subagent's calls are attributed to the task its parent session held
-  when the subagent was dispatched (the parent's `Agent` `tool_use` whose id matches the
-  meta's `toolUseId`; failing that, the subagent's first record timestamp). Its role is the
-  meta's `agentType`, with `general-purpose` shown together with the first 40 characters of
-  its `description`. The parent's own calls have role `orchestrator`.
+- **D-usage-subagents.** A subagent's calls are attributed to one task and one role, resolved
+  in this order: (1) the `subagent.start` (or `subagent.stop`) event whose `agent_id` matches
+  the transcript's `<id>`, which already names the task and the `agent_type`; (2) failing
+  that, the task the parent session held when the parent's `Agent` `tool_use` whose id
+  matches the meta's `toolUseId` was issued; (3) failing that, the task held at the
+  subagent's first record timestamp. The role is the event's `agent_type`, else the meta's
+  `agentType`, else `subagent`; `general-purpose` is shown together with the first 40
+  characters of its `description`. The parent's own calls have role `orchestrator`. Tokens
+  always come from the transcript; ratchet's events only say whose they are.
 - **D-usage-orientation.** Per session, "orientation" is the orchestrator's tokens from the
   session's first record until the earliest of: its first `task.claimed`, its first `Agent`
   dispatch, its first `Edit`/`Write`/`NotebookEdit`. It is the cost the repo map (group 6) is
@@ -127,8 +137,9 @@ Git is not consulted. The database is read through the existing read paths; no n
   `openspec/specs/usage/spec.md`, driving the binary with `RATCHET_HOME` and
   `RATCHET_CLAUDE_PROJECTS` pointing at temp dirs holding synthesized transcripts (a fixture
   builder writes records with exactly the fields of §2; no real transcript is copied into the
-  repo). Scenarios: one task, one session, orchestrator only; a subagent attributed through
-  `toolUseId`; a subagent attributed by first timestamp when the id is missing; two tasks held
+  repo). Scenarios: one task, one session, orchestrator only; a subagent attributed through its
+  `subagent.start` event; a subagent attributed through `toolUseId` when no event exists; a
+  subagent attributed by first timestamp when both are missing; two tasks held
   in sequence; calls before the first claim counted as orientation; two review rounds and
   tokens per round; weights present and absent; a transcript with garbage lines and a record
   without usage (counts reported); `--json` shape; `--note` appends; a session without a
