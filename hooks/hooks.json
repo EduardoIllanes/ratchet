@@ -18,6 +18,9 @@
     "Stop": [
       { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" hook stop", "shell": "bash", "timeout": 10 } ] }
     ],
+    "SubagentStart": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" hook subagent-start", "shell": "bash", "timeout": 10 } ] }
+    ],
     "SubagentStop": [
       { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" hook subagent-stop", "shell": "bash", "timeout": 10 } ] }
     ],

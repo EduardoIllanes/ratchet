@@ -2,10 +2,11 @@
 //! on every prompt. Reads only: a briefing that failed must never cost a registration, so every
 //! query here falls back to "nothing" instead of propagating an error.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 use crate::config::Thresholds;
 use crate::model::{Session, Task, TaskStatus};
@@ -122,11 +123,159 @@ pub fn prompt_line(conn: &Connection, session: &Session) -> Option<String> {
     } else {
         String::new()
     };
-    Some(format!(
+    let base = format!(
         "[ratchet] {} {}{progress}{handoff}{more}",
         task.id,
         task.status.as_str()
-    ))
+    );
+    let mut lines = vec![base];
+    lines.extend(stopped_no_record_lines(conn, &session.id, &task.id));
+    lines.extend(running_lines(conn, &session.id, &task.id));
+    Some(lines.join("\n"))
+}
+
+/// Extra reminder lines for subagents of this session, scoped to the first held task only.
+/// Every query here falls back to "nothing": a failed read must never cost the base reminder.
+///
+/// Kinds are string literals, never `model::EventKind`: the subagent kinds are extended in
+/// parallel and this must not couple to them.
+fn stopped_no_record_lines(conn: &Connection, session_id: &str, task_id: &str) -> Vec<String> {
+    let cutoff = prompt_cutoff(conn, session_id);
+    let stops: Vec<(i64, String)> = query_id_payload(
+        conn,
+        "SELECT id, payload FROM events WHERE session_id = ?1 AND kind = 'subagent.stop' AND id > ?2 ORDER BY id ASC",
+        session_id,
+        Some(cutoff),
+    );
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for (id, payload) in stops {
+        let agent = agent_id_of(&payload);
+        if !seen.insert(agent.clone()) {
+            continue;
+        }
+        // Any handoff, checklist change, note or status change on this task after the stop
+        // counts as a record, whoever wrote it. On a read error assume a record exists.
+        let records: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE task_id = ?1 AND id > ?2 AND kind IN ('handoff','checklist.done','checklist.undone','note','task.status')",
+                params![task_id, id],
+                |r| r.get(0),
+            )
+            .unwrap_or(1);
+        if records == 0 {
+            out.push(format!(
+                "[ratchet] {task_id} · subagent {} stopped with no record",
+                short8(&agent)
+            ));
+        }
+    }
+    out
+}
+
+/// One line per agent with a `subagent.start` and no later `subagent.stop`, by event id.
+fn running_lines(conn: &Connection, session_id: &str, task_id: &str) -> Vec<String> {
+    let starts = query_id_payload(
+        conn,
+        "SELECT id, payload FROM events WHERE session_id = ?1 AND kind = 'subagent.start' ORDER BY id ASC",
+        session_id,
+        None,
+    );
+    if starts.is_empty() {
+        return Vec::new();
+    }
+    let stops = query_id_payload(
+        conn,
+        "SELECT id, payload FROM events WHERE session_id = ?1 AND kind = 'subagent.stop' ORDER BY id ASC",
+        session_id,
+        None,
+    );
+    let mut last_start: HashMap<String, i64> = HashMap::new();
+    for (id, payload) in &starts {
+        last_start.insert(agent_id_of(payload), *id);
+    }
+    let mut last_stop: HashMap<String, i64> = HashMap::new();
+    for (id, payload) in &stops {
+        last_stop.insert(agent_id_of(payload), *id);
+    }
+    let mut running: Vec<(i64, String)> = last_start
+        .into_iter()
+        .filter(|(agent, start)| *start > last_stop.get(agent).copied().unwrap_or(0))
+        .map(|(agent, start)| (start, agent))
+        .collect();
+    running.sort();
+    running
+        .into_iter()
+        .map(|(_, agent)| format!("[ratchet] {task_id} · subagent {} running", short8(&agent)))
+        .collect()
+}
+
+/// The window for "since the last prompt" starts at the previous prompt, not the triggering
+/// one: dispatch records the `session.prompt` heartbeat before this reminder reads, so the
+/// triggering prompt is always the max id and a stop before it would never count otherwise.
+/// Mirrors `handoff_rule::penultimate_prompt_id`. Zero when there are fewer than two prompts.
+fn prompt_cutoff(conn: &Connection, session_id: &str) -> i64 {
+    let mut stmt = match conn.prepare(
+        "SELECT id FROM events WHERE session_id = ?1 AND kind = 'session.prompt' ORDER BY id DESC LIMIT 2",
+    ) {
+        Ok(s) => s,
+        Err(_) => return i64::MAX,
+    };
+    let ids: Vec<i64> = stmt
+        .query_map(params![session_id], |r| r.get(0))
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .unwrap_or_default();
+    if ids.len() == 2 {
+        ids[1]
+    } else {
+        0
+    }
+}
+
+/// `(id, payload)` rows for a session-scoped subagent query; empty on any error.
+fn query_id_payload(
+    conn: &Connection,
+    sql: &str,
+    session_id: &str,
+    after: Option<i64>,
+) -> Vec<(i64, String)> {
+    let mut stmt = match conn.prepare(sql) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mapped = match after {
+        Some(id) => stmt.query_map(params![session_id, id], id_payload_row),
+        None => stmt.query_map(params![session_id], id_payload_row),
+    };
+    mapped
+        .and_then(|rows| rows.collect::<Result<Vec<(i64, String)>, _>>())
+        .unwrap_or_default()
+}
+
+fn id_payload_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String)> {
+    Ok((r.get(0)?, r.get(1)?))
+}
+
+/// The `agent_id` key of a subagent event payload, or `"unknown"` when absent.
+fn agent_id_of(payload: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("agent_id").cloned())
+        .and_then(|v| match v {
+            serde_json::Value::String(s) if !s.is_empty() => Some(s),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Eight characters are enough to name a subagent in a reminder; shorter ids stay whole.
+fn short8(agent_id: &str) -> String {
+    if agent_id.chars().count() > 8 {
+        agent_id.chars().take(8).collect()
+    } else {
+        agent_id.to_string()
+    }
 }
 
 fn task_line(conn: &Connection, task: &Task, with_handoff: bool) -> String {
@@ -559,5 +708,262 @@ mod tests {
         }
         let line = prompt_line(&conn, &session).unwrap();
         assert!(line.contains("(+2 more)"), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod scratch_subagent_probe_placeholder {
+    use super::*;
+    use crate::db;
+    use crate::model::{LaunchedBy, SessionMode};
+    use crate::services::sessions::{self, StartInput};
+    use crate::services::tasks::{self, NewTask};
+
+    fn at2(s: &str) -> DateTime<Utc> {
+        crate::clock::parse(s).unwrap()
+    }
+
+    fn setup2(session_id: &str) -> (Connection, Session) {
+        let mut conn = db::open_memory().unwrap();
+        db::migrate(&mut conn).unwrap();
+        let session = sessions::upsert_start(
+            &mut conn,
+            StartInput {
+                session_id,
+                repo: "demo",
+                repo_root: "root",
+                cwd: "root",
+                worktree: None,
+                branch: Some("main"),
+                mode: SessionMode::Interactive,
+                launched_by: LaunchedBy::User,
+            },
+            at2("2026-09-16T12:00:00Z"),
+        )
+        .unwrap();
+        (conn, session)
+    }
+
+    fn claim_one(conn: &mut Connection, sid: &str) -> String {
+        let t = tasks::create(
+            conn,
+            NewTask {
+                title: "held",
+                body: "",
+                repo: "demo",
+                repo_root: "root",
+                priority: 3,
+                parent_id: None,
+                tags: &[],
+                checklist: &[],
+            },
+            crate::model::Source::Cli,
+            None,
+            at2("2026-09-16T12:00:00Z"),
+        )
+        .unwrap();
+        tasks::claim(
+            conn,
+            &t.id,
+            sid,
+            &Thresholds::default(),
+            crate::model::Source::Cli,
+            at2("2026-09-16T12:01:00Z"),
+        )
+        .unwrap();
+        t.id
+    }
+
+    fn ev(conn: &Connection, sid: &str, tid: Option<&str>, kind: &str, payload: &str, ts: &str) {
+        conn.execute(
+            "INSERT INTO events(ts, session_id, task_id, kind, payload, source) VALUES (?1,?2,?3,?4,?5,'hook')",
+            rusqlite::params![ts, sid, tid, kind, payload],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn probe_stopped_no_record() {
+        let (mut c, session) = setup2("s-1");
+        let id = claim_one(&mut c, "s-1");
+        ev(
+            &c,
+            "s-1",
+            None,
+            "session.prompt",
+            "{}",
+            "2026-09-16T12:02:00Z",
+        );
+        ev(
+            &c,
+            "s-1",
+            Some(&id),
+            "subagent.stop",
+            r#"{"agent_id":"abcdefgh1234"}"#,
+            "2026-09-16T12:03:00Z",
+        );
+        let line = prompt_line(&c, &session).unwrap();
+        assert_eq!(line.lines().count(), 2, "{line}");
+        assert!(
+            line.contains(&format!(
+                "[ratchet] {id} · subagent abcdefgh stopped with no record"
+            )),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn probe_trigger_prompt_does_not_swallow_stop() {
+        let (mut c, session) = setup2("s-1");
+        let id = claim_one(&mut c, "s-1");
+        ev(
+            &c,
+            "s-1",
+            None,
+            "session.prompt",
+            "{}",
+            "2026-09-16T12:02:00Z",
+        );
+        ev(
+            &c,
+            "s-1",
+            Some(&id),
+            "subagent.stop",
+            r#"{"agent_id":"abcdefgh1234"}"#,
+            "2026-09-16T12:03:00Z",
+        );
+        ev(
+            &c,
+            "s-1",
+            None,
+            "session.prompt",
+            "{}",
+            "2026-09-16T12:04:00Z",
+        );
+        let line = prompt_line(&c, &session).unwrap();
+        assert_eq!(line.lines().count(), 2, "{line}");
+        assert!(line.contains("stopped with no record"), "{line}");
+    }
+
+    #[test]
+    fn probe_stale_stop_is_silent() {
+        let (mut c, session) = setup2("s-1");
+        let _ = claim_one(&mut c, "s-1");
+        ev(
+            &c,
+            "s-1",
+            None,
+            "session.prompt",
+            "{}",
+            "2026-09-16T12:02:00Z",
+        );
+        ev(
+            &c,
+            "s-1",
+            Some("T-x"),
+            "subagent.stop",
+            r#"{"agent_id":"abcdefgh1234"}"#,
+            "2026-09-16T12:03:00Z",
+        );
+        ev(
+            &c,
+            "s-1",
+            None,
+            "session.prompt",
+            "{}",
+            "2026-09-16T12:04:00Z",
+        );
+        ev(
+            &c,
+            "s-1",
+            None,
+            "session.prompt",
+            "{}",
+            "2026-09-16T12:05:00Z",
+        );
+        let line = prompt_line(&c, &session).unwrap();
+        assert_eq!(line.lines().count(), 1, "{line}");
+    }
+
+    #[test]
+    fn probe_stop_with_note_is_silent() {
+        let (mut c, session) = setup2("s-1");
+        let id = claim_one(&mut c, "s-1");
+        ev(
+            &c,
+            "s-1",
+            Some(&id),
+            "subagent.stop",
+            r#"{"agent_id":"abcdefgh1234"}"#,
+            "2026-09-16T12:03:00Z",
+        );
+        ev(
+            &c,
+            "s-1",
+            Some(&id),
+            "note",
+            r#"{"text":"recorded"}"#,
+            "2026-09-16T12:04:00Z",
+        );
+        let line = prompt_line(&c, &session).unwrap();
+        assert_eq!(line.lines().count(), 1, "{line}");
+    }
+
+    #[test]
+    fn probe_running_and_unknown() {
+        let (mut c, session) = setup2("s-1");
+        let id = claim_one(&mut c, "s-1");
+        ev(
+            &c,
+            "s-1",
+            Some(&id),
+            "subagent.start",
+            r#"{"agent_id":"zzzzzzzz9999"}"#,
+            "2026-09-16T12:03:00Z",
+        );
+        ev(
+            &c,
+            "s-1",
+            Some(&id),
+            "subagent.start",
+            r#"{}"#,
+            "2026-09-16T12:04:00Z",
+        );
+        let line = prompt_line(&c, &session).unwrap();
+        assert_eq!(line.lines().count(), 3, "{line}");
+        assert!(
+            line.contains(&format!("[ratchet] {id} · subagent zzzzzzzz running")),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("[ratchet] {id} · subagent unknown running")),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn probe_start_then_stop_is_not_running() {
+        let (mut c, session) = setup2("s-1");
+        let id = claim_one(&mut c, "s-1");
+        ev(
+            &c,
+            "s-1",
+            Some(&id),
+            "subagent.start",
+            r#"{"agent_id":"a1"}"#,
+            "2026-09-16T12:03:00Z",
+        );
+        ev(
+            &c,
+            "s-1",
+            Some(&id),
+            "subagent.stop",
+            r#"{"agent_id":"a1"}"#,
+            "2026-09-16T12:04:00Z",
+        );
+        let line = prompt_line(&c, &session).unwrap();
+        assert_eq!(line.lines().count(), 2, "{line}");
+        assert!(line.contains("stopped with no record"), "{line}");
+        assert!(!line.contains("running"), "{line}");
     }
 }

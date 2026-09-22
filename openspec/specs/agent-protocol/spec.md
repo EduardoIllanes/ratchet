@@ -254,8 +254,12 @@ back.
 ### Requirement: Task reminder on every prompt
 On every user prompt in an opted-in repo, if the session holds a task in progress, the hook SHALL
 add to the context exactly one line with the identifier, the status, the progress and the abbreviated
-last handoff, and say how many other tasks it holds when there are more. If the session holds no
-task, the hook SHALL add nothing at all.
+last handoff, and say how many other tasks it holds when there are more. When a subagent of the
+session stopped since the last prompt and the first held task received no handoff, no checklist
+change, no note and no status change after that stop, the hook SHALL add one more line naming the
+task and the stopped subagent. When a subagent started and has no stop since, the hook SHALL add
+one more line naming the task and the running subagent. If the session holds no task, the hook
+SHALL add nothing at all.
 
 #### Scenario: With a claimed task
 - **WHEN** a session holding a task at 2 of 5 receives a prompt
@@ -264,6 +268,18 @@ task, the hook SHALL add nothing at all.
 #### Scenario: Without a claimed task
 - **WHEN** a session holding no task receives a prompt
 - **THEN** the hook adds no output at all
+
+#### Scenario: A subagent stopped with no record adds a line
+- **WHEN** a session holding a task receives a prompt after one of its subagents stopped and nothing was recorded against that task since the stop
+- **THEN** the context gains the task line plus one line naming the task and the stopped subagent
+
+#### Scenario: A subagent stopped with a record adds no line
+- **WHEN** a session holding a task receives a prompt after one of its subagents stopped but a note was recorded against that task since the stop
+- **THEN** the context gains the task line and no subagent line
+
+#### Scenario: A running subagent adds a line
+- **WHEN** a session holding a task receives a prompt while one of its subagents started and never stopped
+- **THEN** the context gains the task line plus one line naming the task and the running subagent
 
 ### Requirement: Handoff rule when the session closes
 When a session tries to close while holding at least one task in progress that received no handoff,
@@ -302,3 +318,7 @@ directory, and the terminal SHALL receive the first 20 lines plus the path of th
 #### Scenario: A task listing is one line per task
 - **WHEN** an agent lists the tasks ready to take
 - **THEN** each task takes exactly one line with its identifier, status, priority, title and progress
+
+#### Scenario: Subagent events appear in the detail view
+- **WHEN** a subagent stop was recorded against a task
+- **THEN** the detail view of that task lists the stop event with the other events of its history

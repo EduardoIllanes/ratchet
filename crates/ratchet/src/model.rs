@@ -75,6 +75,8 @@ db_enum!(EventKind, Note, {
     SessionPrompt => "session.prompt",
     SessionStop => "session.stop",
     SessionEnd => "session.end",
+    SubagentStart => "subagent.start",
+    SubagentStop => "subagent.stop",
     TaskCreated => "task.created",
     TaskClaimed => "task.claimed",
     TaskStatus => "task.status",

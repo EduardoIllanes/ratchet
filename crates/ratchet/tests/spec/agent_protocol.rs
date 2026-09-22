@@ -800,3 +800,181 @@ fn agent_protocol__dry_run_reproduces_the_block() {
             || stderr(&out).contains("[ratchet guardrail:python-venv]")
     );
 }
+
+// --- Requirement: Task reminder names subagents ------------------------------------------
+
+/// A subagent stop for `agent` in `session`, carrying its own type so no meta file lookup
+/// is involved. The agent keys ride on the hook input; `Payload` parses them once task B
+/// lands.
+fn record_stop(sb: &Sandbox, session: &str, agent: &str, minutes: i64) -> std::process::Output {
+    let root = sb.root();
+    let transcript = sb.scratchpad.path().join("transcripts").join("t.jsonl");
+    let payload = serde_json::json!({
+        "session_id": session,
+        "cwd": root.to_string_lossy(),
+        "agent_id": agent,
+        "agent_type": "explore",
+        "description": "reconnoitre",
+        "transcript_path": transcript.to_string_lossy(),
+        "exit_status": 0,
+    });
+    let when = at(minutes);
+    hook_env(
+        sb,
+        "subagent-stop",
+        &payload,
+        &root,
+        &[("RATCHET_NOW", &when)],
+    )
+}
+
+/// A subagent start for `agent` in `session` with no stop after it.
+fn record_start(sb: &Sandbox, session: &str, agent: &str, minutes: i64) -> std::process::Output {
+    let root = sb.root();
+    let transcript = sb.scratchpad.path().join("transcripts").join("t.jsonl");
+    let payload = serde_json::json!({
+        "session_id": session,
+        "cwd": root.to_string_lossy(),
+        "agent_id": agent,
+        "agent_type": "explore",
+        "description": "reconnoitre",
+        "transcript_path": transcript.to_string_lossy(),
+    });
+    let when = at(minutes);
+    hook_env(
+        sb,
+        "subagent-start",
+        &payload,
+        &root,
+        &[("RATCHET_NOW", &when)],
+    )
+}
+
+fn prompt_at(sb: &Sandbox, session: &str, minutes: i64) -> std::process::Output {
+    let root = sb.root();
+    let when = at(minutes);
+    hook_env(
+        sb,
+        "prompt",
+        &session_payload(session, &root),
+        &root,
+        &[("RATCHET_NOW", &when)],
+    )
+}
+
+/// A session holding one claimed task, for the subagent reminder scenarios.
+fn held_session(session: &str) -> (Sandbox, String) {
+    let sb = board(session);
+    let id = new_task(&sb, "held work", &["a"], session, 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], session, 2)), 0);
+    (sb, id)
+}
+
+#[test]
+fn agent_protocol__a_subagent_stopped_with_no_record_adds_a_line() {
+    let session = "s-rem-stop";
+    let (sb, id) = held_session(session);
+    let agent = "a1b2c3d4e5f60718";
+    let stopped = record_stop(&sb, session, agent, 3);
+    assert_eq!(code(&stopped), 0, "{}", stderr(&stopped));
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND kind = 'subagent.stop'",
+            &[session]
+        ),
+        1
+    );
+    let out = prompt_at(&sb, session, 4);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let printed = lines(&out);
+    assert_eq!(printed.len(), 2, "{printed:?}");
+    assert!(printed[0].contains(&id), "{}", printed[0]);
+    assert_eq!(
+        printed[1],
+        format!(
+            "[ratchet] {id} · subagent {} stopped with no record",
+            &agent[..8]
+        )
+    );
+}
+
+#[test]
+fn agent_protocol__a_subagent_stopped_with_a_record_adds_no_line() {
+    let session = "s-rem-noted";
+    let (sb, id) = held_session(session);
+    let agent = "b1c2d3e4f5a60718";
+    let stopped = record_stop(&sb, session, agent, 3);
+    assert_eq!(code(&stopped), 0, "{}", stderr(&stopped));
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND kind = 'subagent.stop'",
+            &[session]
+        ),
+        1
+    );
+    assert_eq!(
+        code(&task(
+            &sb,
+            &["note", &id, "saw the subagent stop"],
+            session,
+            4
+        )),
+        0
+    );
+    let out = prompt_at(&sb, session, 5);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let printed = lines(&out);
+    assert_eq!(printed.len(), 1, "{printed:?}");
+    assert!(printed[0].contains(&id), "{}", printed[0]);
+    assert!(
+        !printed[0].contains("subagent"),
+        "a note was recorded since the stop: {}",
+        printed[0]
+    );
+}
+
+#[test]
+fn agent_protocol__a_running_subagent_adds_a_line() {
+    let session = "s-rem-running";
+    let (sb, id) = held_session(session);
+    let agent = "c1d2e3f4a5b60718";
+    let started = record_start(&sb, session, agent, 3);
+    assert_eq!(code(&started), 0, "{}", stderr(&started));
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND kind = 'subagent.start'",
+            &[session]
+        ),
+        1
+    );
+    let out = prompt_at(&sb, session, 4);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let printed = lines(&out);
+    assert_eq!(printed.len(), 2, "{printed:?}");
+    assert!(printed[0].contains(&id), "{}", printed[0]);
+    assert_eq!(
+        printed[1],
+        format!("[ratchet] {id} · subagent {} running", &agent[..8])
+    );
+}
+
+#[test]
+fn agent_protocol__subagent_events_appear_in_the_detail_view() {
+    let session = "s-rem-shown";
+    let (sb, id) = held_session(session);
+    let stopped = record_stop(&sb, session, "d1e2f3a4b5c60718", 3);
+    assert_eq!(code(&stopped), 0, "{}", stderr(&stopped));
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE task_id = ?1 AND kind = 'subagent.stop'",
+            &[id.as_str()]
+        ),
+        1
+    );
+    let shown = stdout(&task(&sb, &["show", &id], session, 4));
+    assert!(shown.contains("subagent.stop"), "{shown}");
+}

@@ -72,22 +72,56 @@ no marker above it, nothing SHALL be registered.
 - **THEN** it exits successfully, prints nothing, and no database is created
 
 ### Requirement: Heartbeat
-Every user prompt, every end of a response, every end of a subagent and every compaction
-SHALL refresh the last signal of the session. A prompt and an end of response SHALL also
-record an event; a subagent end and a compaction SHALL NOT. A hook that arrives for a
-session that is not registered yet SHALL register it instead of failing.
+Every user prompt, every end of a response, every subagent start, every subagent end and
+every compaction SHALL refresh the last signal of the session. A prompt, an end of response,
+a subagent start and a subagent end SHALL also record an event; a compaction SHALL NOT. A
+hook that arrives for a session that is not registered yet SHALL register it instead of
+failing.
 
 #### Scenario: A prompt updates the last signal
 - **WHEN** a prompt arrives for a registered session
 - **THEN** its last signal moves forward and a prompt event is recorded
 
-#### Scenario: Compaction and subagent end update the last signal
-- **WHEN** a compaction and then a subagent end arrive for a registered session
-- **THEN** its last signal moves forward and no extra event is recorded for either
+#### Scenario: Compaction updates the last signal with no event
+- **WHEN** a compaction arrives for a registered session
+- **THEN** its last signal moves forward and no extra event is recorded for it
 
 #### Scenario: A hook of an unregistered session registers it
 - **WHEN** the first hook to arrive for a session identifier is a prompt, not a session start
 - **THEN** the session is registered and its last signal is set
+
+### Requirement: Subagent start and stop
+A subagent start SHALL record a `subagent.start` event and a subagent end a `subagent.stop`
+event, both attributed to the session the hook arrived for. When that session holds tasks in
+progress, the event SHALL carry the first of them as its task; when it holds none, the event
+SHALL carry no task. The payload SHALL carry the agent identifier, its type and description
+when known, and the transcript path when the input offers one; a stop SHALL also carry the
+exit status when the input offers one. When the input carries an agent identifier but no
+type, the hook SHALL read the file `agent-<id>.meta.json` from the `subagents` directory of
+that session next to the transcript — the directory named after the session beside the
+transcript path — without ever writing to it, and take the type and description from its
+`agentType` and `description` fields when present. A missing or unreadable meta file SHALL
+NOT fail the hook: the event is recorded with whatever identity is known.
+
+#### Scenario: A subagent start records a start event
+- **WHEN** a subagent start with an agent identifier, a type and a transcript path arrives for a session holding a task in progress
+- **THEN** its last signal moves forward and one `subagent.start` event is recorded with that task and a payload carrying the agent identifier, the type and the transcript path
+
+#### Scenario: A subagent stop records a stop event
+- **WHEN** a subagent stop with an agent identifier, a type, a transcript path and an exit status arrives for a session holding a task in progress
+- **THEN** one `subagent.stop` event is recorded with that task and a payload carrying the agent identifier, the type, the transcript path and the exit status
+
+#### Scenario: A stop with no held task records a session-level event
+- **WHEN** a subagent stop arrives for a session holding no task in progress
+- **THEN** one `subagent.stop` event is recorded with no task
+
+#### Scenario: A missing type falls back to the meta file
+- **WHEN** a subagent stop carries an agent identifier and a transcript path but no type, and the meta file for that agent beside that transcript names a type and a description
+- **THEN** the recorded `subagent.stop` event carries that type and that description
+
+#### Scenario: A missing meta file still records
+- **WHEN** a subagent stop carries an agent identifier but no type and no meta file exists for it
+- **THEN** the hook exits successfully and the `subagent.stop` event is recorded with the identifier alone
 
 ### Requirement: Derived session state
 The state of a session SHALL be derived, never stored: ended when it has an end; otherwise
