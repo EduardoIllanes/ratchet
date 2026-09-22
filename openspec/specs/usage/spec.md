@@ -118,11 +118,19 @@ the task's sessions and under `--by role` as the average per session.
 ### Requirement: Review rounds are counted from status events
 A task's rounds SHALL be the number of its `task.status` events whose new status is `review`.
 Tokens per round SHALL be the task's tokens between consecutive entries into `review`, the
-first round counting from the first claim.
+first round counting from the first claim. While the task's current status is still `review`,
+`ratchet usage <id>` SHALL additionally show one `current` line spanning [the last entry into
+`review`, now or, for a report built from a closed session's data, that session's end) — the
+tokens of the fix round that is still open. The `current` line does NOT change what `rounds`
+counts and is absent once the task leaves `review`.
 
 #### Scenario: Two review rounds and tokens per round
 - **WHEN** `T-0001` goes `review`, then two more calls while it stays in `review`, then `review` again after a bare `status` back to `in_progress`
 - **THEN** `ratchet usage T-0001` shows `rounds 2` and two per-round lines, the second equal to the two calls in between
+
+#### Scenario: A task still in review shows a current round
+- **WHEN** `T-0001` goes `review` once, then two more calls happen with the task still in `review` and no further status change
+- **THEN** `ratchet usage T-0001` (and its `--json`) shows `rounds 1` and a `current` line/field equal to the two calls, separate from the numbered rounds
 
 ### Requirement: Weights add a cost column, and only then
 `[usage.weights."<model prefix>"]` tables in `~/.ratchet/config.toml` with `input`,
