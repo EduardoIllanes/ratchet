@@ -2,6 +2,8 @@
 //! on every prompt. Reads only: a briefing that failed must never cost a registration, so every
 //! query here falls back to "nothing" instead of propagating an error.
 
+use std::path::Path;
+
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
@@ -17,13 +19,20 @@ pub const MAX_READY: usize = 5;
 pub const COMMANDS_LINE: &str =
     "Commands: ratchet task show|claim|check|note|handoff  ·  full guide: skill ratchet-tasks";
 
-pub fn build(conn: &Connection, session: &Session, th: &Thresholds, now: DateTime<Utc>) -> String {
+pub fn build(
+    conn: &Connection,
+    session: &Session,
+    main_root: &Path,
+    th: &Thresholds,
+    now: DateTime<Utc>,
+) -> String {
     let header = format!(
         "[ratchet] repo {} · session {} · branch {}",
         session.repo,
         short(&session.id),
         session.branch.as_deref().unwrap_or("?")
     );
+    let map_line = crate::map::briefing_line(main_root);
     let orphans = tasks::orphaned(conn, &session.repo_root, th, now).unwrap_or_default();
     let mine = tasks::list(
         conn,
@@ -48,7 +57,10 @@ pub fn build(conn: &Connection, session: &Session, th: &Thresholds, now: DateTim
     .take(MAX_READY)
     .collect();
     if orphans.is_empty() && mine.is_empty() && ready.is_empty() {
-        return header;
+        return match &map_line {
+            Some(l) => format!("{header}\n{l}"),
+            None => header,
+        };
     }
     let mut lines = vec![header];
     if !mine.is_empty() {
@@ -69,6 +81,12 @@ pub fn build(conn: &Connection, session: &Session, th: &Thresholds, now: DateTim
         lines.extend(ready.iter().map(|t| task_line(conn, t, false)));
     }
     lines.push(COMMANDS_LINE.to_string());
+    // The map line is dropped first (design §4.3): only inserted when the rest already fits.
+    if let Some(l) = &map_line {
+        if lines.len() < MAX_LINES {
+            lines.insert(1, l.clone());
+        }
+    }
     if lines.len() > MAX_LINES {
         lines.truncate(MAX_LINES - 2);
         lines.push("  … (more in `ratchet task list`)".to_string());
@@ -213,15 +231,16 @@ mod tests {
     }
 
     #[test]
-    fn a_quiet_repo_gets_exactly_one_line() {
+    fn a_quiet_repo_with_no_map_adds_the_map_none_line() {
         let (conn, session) = setup("session-abcdef0123");
         let text = build(
             &conn,
             &session,
+            Path::new("root"),
             &Thresholds::default(),
             at("2026-09-16T12:01:00Z"),
         );
-        assert_eq!(text.lines().count(), 1, "{text}");
+        assert_eq!(text.lines().count(), 2, "{text}");
         // G2-P7(a): `short("session-abcdef0123")` keeps the hyphen inside its 8-char window, so
         // the short form is "session-…", not "session…" as the brief's own assertion assumed.
         assert!(
@@ -229,6 +248,53 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("branch main"), "{text}");
+        assert!(
+            text.contains("map: none — run /ratchet:map for the repo layout"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_quiet_repo_with_a_current_map_prints_exactly_one_line() {
+        use std::process::{Command, Stdio};
+        let (conn, session) = setup("session-abcdef0123");
+        let d = tempfile::TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            let st = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(d.path())
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(st.success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "--allow-empty", "-q", "-m", "init"]);
+        let generated = crate::map::generate(
+            d.path(),
+            &crate::config::MapSection::default(),
+            at("2026-09-16T12:00:00Z"),
+        )
+        .unwrap();
+        crate::map::write_map(d.path(), &generated).unwrap();
+
+        let text = build(
+            &conn,
+            &session,
+            d.path(),
+            &Thresholds::default(),
+            at("2026-09-16T12:01:00Z"),
+        );
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(
+            text.starts_with("[ratchet] repo demo · session session-…"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -293,7 +359,13 @@ mod tests {
         )
         .unwrap();
 
-        let text = build(&conn, &session, &Thresholds::default(), now);
+        let text = build(
+            &conn,
+            &session,
+            Path::new("root"),
+            &Thresholds::default(),
+            now,
+        );
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with("[ratchet] repo demo"), "{text}");
         let mine_at = lines
@@ -334,6 +406,7 @@ mod tests {
         let text = build(
             &conn,
             &session,
+            Path::new("root"),
             &Thresholds::default(),
             at("2026-09-16T12:02:00Z"),
         );
@@ -383,6 +456,7 @@ mod tests {
         let text = build(
             &conn,
             &session,
+            Path::new("root"),
             &Thresholds::default(),
             at("2026-09-16T12:03:00Z"),
         );
