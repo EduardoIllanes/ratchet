@@ -6,3 +6,4 @@ pub mod map_cmd;
 pub mod pdf_cmd;
 pub mod session_cmd;
 pub mod task_cmd;
+pub mod usage_cmd;
