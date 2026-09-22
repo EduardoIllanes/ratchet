@@ -13,6 +13,7 @@ mod output;
 mod pdf;
 mod repo;
 mod services;
+mod usage;
 
 use std::collections::HashMap;
 

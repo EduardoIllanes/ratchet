@@ -131,6 +131,26 @@ impl Default for PdfSettings {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelWeights {
+    /// Per million tokens, in whatever unit the owner likes. Unset fields default to zero.
+    pub input: f64,
+    pub cache_write: f64,
+    pub cache_read: f64,
+    pub output: f64,
+}
+
+// Consumed by usage::weights (Task 2) and cli::usage_cmd (Task 4).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct UsageSettings {
+    /// Keyed by model prefix, e.g. `"claude-sonnet"`; matched by longest prefix
+    /// (`usage::weights::matching`). Empty when `[usage.weights]` is absent from the file.
+    pub weights: HashMap<String, ModelWeights>,
+}
+
 // Consumed by Task 6 (guardrails::rules::load_rule_set).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -138,6 +158,7 @@ impl Default for PdfSettings {
 pub struct MachineConfig {
     pub guardrails: MachineGuardrails,
     pub pdf: PdfSettings,
+    pub usage: UsageSettings,
 }
 
 // Field type of MachineConfig; consumed by Task 6 (guardrails::rules::load_rule_set).
@@ -346,6 +367,39 @@ mod tests {
     fn pdf_unknown_key_is_an_error_like_other_tables() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("config.toml"), "[pdf]\nbogus = 1\n").unwrap();
+        let err = load_machine_config(dir.path()).unwrap_err();
+        assert!(err.message.contains("bogus"), "{}", err.message);
+    }
+
+    #[test]
+    fn usage_settings_default_is_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let c = load_machine_config(dir.path()).unwrap();
+        assert!(c.usage.weights.is_empty());
+    }
+
+    #[test]
+    fn usage_weights_parse_a_quoted_prefix_table() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[usage.weights.\"claude-sonnet\"]\ninput = 3.0\ncache_write = 3.75\ncache_read = 0.3\noutput = 15.0\n",
+        )
+        .unwrap();
+        let c = load_machine_config(dir.path()).unwrap();
+        let w = c.usage.weights.get("claude-sonnet").unwrap();
+        assert_eq!(w.input, 3.0);
+        assert_eq!(w.output, 15.0);
+    }
+
+    #[test]
+    fn usage_weights_unknown_key_is_an_error_like_other_tables() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[usage.weights.\"x\"]\nbogus = 1\n",
+        )
+        .unwrap();
         let err = load_machine_config(dir.path()).unwrap_err();
         assert!(err.message.contains("bogus"), "{}", err.message);
     }
