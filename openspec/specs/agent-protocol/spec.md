@@ -55,7 +55,13 @@ rule and the alternative, prefixed `[ratchet guardrail:<id>]`: (a) `python`, `pi
 `git checkout -- .`, `git clean -f` and recursive forced deletion, except a deletion whose
 every target is under the session scratchpad; (c) writes to `.env` files; (d) writes to a
 tracked file of the main tree of the repo, from any session, including one running in a
-worktree. Command rules SHALL evaluate each command segment separately, splitting on `;`,
+worktree — whether the write is an `Edit`, `Write`, `NotebookEdit` or `MultiEdit` call, or a
+`Bash`/`PowerShell` command segment of a recognised writing shape whose target is such a file:
+a `>` or `>>` redirection, `tee`, `sed -i`, the destination of `cp`, `mv` or `rsync`, and the
+paths given to `git checkout --` or `git restore`. A command that writes through an
+interpreter (`python`, `node`, `perl`, a heredoc script) is NOT recognised before the fact; it
+is caught after the fact (see *Main-tree writes detected after the fact*). Command rules
+SHALL evaluate each command segment separately, splitting on `;`,
 `&&`, `||`, `|` and newlines only outside quotes. The same rules SHALL apply with the same
 message whether the command arrived through `Bash` or `PowerShell`. Rules SHALL be
 extensible from a machine-wide file and from a repo file with the same schema; a rule with
@@ -100,6 +106,45 @@ the id of an existing one SHALL replace it; a repo SHALL be able to disable a ru
 #### Scenario: Untracked file in the main tree allowed
 - **WHEN** a `Write` targets a path in the main tree that git does not track
 - **THEN** the hook allows it
+
+#### Scenario: Bash redirection into a tracked main-tree file blocked
+- **WHEN** the tool call is `echo x > README.md` through `Bash` and the working directory is the main tree, where `README.md` is tracked
+- **THEN** the hook blocks with rule `main-tree` and the same message an `Edit` gets
+
+#### Scenario: Bash writing shapes into the main tree blocked
+- **WHEN** each of `printf y >> src/main.rs`, `tee src/main.rs`, `sed -i '' 's/a/b/' src/main.rs`, `cp /tmp/x src/main.rs`, `mv /tmp/x src/main.rs`, `rsync /tmp/x src/main.rs`, `git checkout -- src/main.rs` and `git restore src/main.rs` is the tool call through `Bash` in the main tree, where `src/main.rs` is tracked
+- **THEN** every one of them blocks with rule `main-tree`, and the same set through `PowerShell` blocks with the same stderr lines
+
+#### Scenario: Bash writing shapes elsewhere allowed
+- **WHEN** the tool call is `echo x > notes.txt` (an untracked path in the main tree), `echo x > <scratchpad>/x`, or `echo x > <worktrees dir>/wt/README.md`, through `Bash`
+- **THEN** the hook allows each of them
+
+#### Scenario: Interpreter write is not blocked before the fact
+- **WHEN** the tool call is a `python - <<'EOF' … EOF` heredoc that rewrites a tracked main-tree file, through `Bash`
+- **THEN** the pre-tool hook allows it
+
+### Requirement: Main-tree writes detected after the fact
+In PostToolUse for `Bash` and `PowerShell` inside an opted-in repo, ratchet SHALL compare the
+set of modified tracked files of the main tree (`git status --porcelain --untracked-files=no`
+at the main root) with the set recorded by the matching PreToolUse, and when a tracked file of
+the main tree changed during the command, SHALL print one stderr line prefixed
+`[ratchet guardrail:main-tree]` naming the changed file(s) and the worktree alternative, and
+SHALL record one event of kind `guardrail.main_tree_write` with the session, the command and
+the files. It SHALL never block (exit 0, no decision), SHALL stay silent when nothing tracked
+changed, and SHALL stay within the hook's time budget: at most one `git status` per hook, the
+"before" set being taken by the PreToolUse that already runs for the command.
+
+#### Scenario: A Bash command that changed a tracked main-tree file is reported after the fact
+- **WHEN** the pre-tool hook ran for a `python` heredoc, the command rewrote a tracked file of the main tree, and the post-tool hook runs with the same session and command
+- **THEN** the post-tool hook exits 0 with no decision, stderr has exactly one line containing `[ratchet guardrail:main-tree]` and the file's path, and the events log holds one `guardrail.main_tree_write` event for that session naming the file
+
+#### Scenario: Post-check is silent when nothing tracked changed
+- **WHEN** the pre-tool hook ran for a command, the command only created an untracked file in the main tree, and the post-tool hook runs
+- **THEN** stdout and stderr are empty, exit 0, and no event is recorded
+
+#### Scenario: Post-check without a prior snapshot is silent
+- **WHEN** the post-tool hook runs for a `Bash` call whose PreToolUse never recorded a snapshot for this session
+- **THEN** stdout and stderr are empty and exit 0
 
 #### Scenario: Rule disabled per repo
 - **WHEN** `ratchet.toml` lists `python-venv` under `guardrails.off` and the tool call is `python scripts/x.py`
