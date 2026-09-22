@@ -754,7 +754,7 @@ pub fn generate(
     let gate = if gate_lines.is_empty() {
         String::new()
     } else {
-        format!("\n## Gate\n\n{}\n", gate_lines.join("\n"))
+        format!("## Gate\n\n{}\n", gate_lines.join("\n"))
     };
 
     let (layout, source_dirs) = layout_section(&files);
@@ -767,23 +767,30 @@ pub fn generate(
         if lines.is_empty() {
             String::new()
         } else {
-            format!("\n## Modules\n\n{}\n", lines.join("\n"))
+            format!("## Modules\n\n{}\n", lines.join("\n"))
         }
     };
     let module_lines: Vec<String> = rows.iter().map(|(_, l)| l.clone()).collect();
-    let mut body = format!(
-        "{header}{gate}\n{layout}{}{tests}\n{docs}\n",
-        render_modules(&module_lines)
-    );
+    // Every section renders as `## X\n\n…\n` or empty; present ones are joined by one blank
+    // line, so no boundary ever gets zero or two blank lines.
+    let assemble = |modules: String| -> String {
+        let sections = [
+            gate.as_str(),
+            layout.as_str(),
+            modules.as_str(),
+            tests.as_str(),
+            docs.as_str(),
+        ];
+        let present: Vec<&str> = sections.into_iter().filter(|s| !s.is_empty()).collect();
+        format!("{header}\n{}\n", present.join("\n"))
+    };
+    let mut body = assemble(render_modules(&module_lines));
 
     const FOOTER_LINES: usize = 2; // sections 1, 2, 7 never collapse (design §3)
     if body.lines().count() + FOOTER_LINES > MAP_LINE_CAP {
         let overshoot = body.lines().count() + FOOTER_LINES - MAP_LINE_CAP;
         let collapsed = collapse_modules(&rows, overshoot);
-        body = format!(
-            "{header}{gate}\n{layout}{}{tests}\n{docs}\n",
-            render_modules(&collapsed)
-        );
+        body = assemble(render_modules(&collapsed));
     }
 
     let footer = format!(
