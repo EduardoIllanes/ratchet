@@ -310,6 +310,120 @@ fn agent_protocol__untracked_file_in_the_main_tree_allowed() {
 }
 
 #[test]
+fn agent_protocol__bash_redirection_into_a_tracked_main_tree_file_blocked() {
+    let sb = sandbox();
+    let root = sb.root();
+    let via_bash = hook_in(&sb, "pre-tool", &bash("echo x > tracked.txt", &root), &root);
+    assert_eq!(code(&via_bash), 2, "stderr: {}", stderr(&via_bash));
+    let err = stderr(&via_bash);
+    assert!(err.starts_with("[ratchet guardrail:main-tree]"), "{err}");
+    // Same message an `Edit` targeting the same tracked file gets.
+    let via_edit = hook_in(
+        &sb,
+        "pre-tool",
+        &edit(&root.join("tracked.txt"), "bye", &root),
+        &root,
+    );
+    assert_eq!(code(&via_edit), 2, "stderr: {}", stderr(&via_edit));
+    assert_eq!(err, stderr(&via_edit));
+}
+
+#[test]
+fn agent_protocol__bash_writing_shapes_into_the_main_tree_blocked() {
+    let sb = sandbox();
+    let root = sb.root();
+    track_file(&sb, "src/main.rs", "fn main() {}\n");
+    let shapes = [
+        "printf y >> src/main.rs",
+        "tee src/main.rs",
+        "sed -i '' 's/a/b/' src/main.rs",
+        "cp /tmp/x src/main.rs",
+        "mv /tmp/x src/main.rs",
+        "rsync /tmp/x src/main.rs",
+        "git checkout -- src/main.rs",
+        "git restore src/main.rs",
+    ];
+    for shape in shapes {
+        let via_bash = hook_in(&sb, "pre-tool", &bash(shape, &root), &root);
+        assert_eq!(
+            code(&via_bash),
+            2,
+            "bash {shape:?}: stderr {}",
+            stderr(&via_bash)
+        );
+        assert!(
+            stderr(&via_bash).starts_with("[ratchet guardrail:main-tree]"),
+            "bash {shape:?}: {}",
+            stderr(&via_bash)
+        );
+        let via_ps = hook_in(&sb, "pre-tool", &powershell(shape, &root), &root);
+        assert_eq!(
+            code(&via_ps),
+            2,
+            "powershell {shape:?}: stderr {}",
+            stderr(&via_ps)
+        );
+        assert_eq!(
+            stderr(&via_bash),
+            stderr(&via_ps),
+            "shape {shape:?} differs between Bash and PowerShell"
+        );
+    }
+}
+
+#[test]
+fn agent_protocol__bash_writing_shapes_elsewhere_allowed() {
+    let sb = sandbox();
+    let root = sb.root();
+    let wt = worktree(&sb);
+    let cases = [
+        "echo x > notes.txt".to_string(),
+        format!("echo x > {}", sb.scratchpad.path().join("x").display()),
+        format!("echo x > {}", wt.join("README.md").display()),
+    ];
+    for cmd in &cases {
+        let out = hook_in(&sb, "pre-tool", &bash(cmd, &root), &root);
+        assert_eq!(code(&out), 0, "{cmd:?}: stderr {}", stderr(&out));
+    }
+    // Companion assertion: the same recognised shape against a tracked main-tree path still
+    // blocks, so a resolver that just always allows `>` redirections can't pass.
+    let blocked = hook_in(&sb, "pre-tool", &bash("echo x > tracked.txt", &root), &root);
+    assert_eq!(code(&blocked), 2, "stderr: {}", stderr(&blocked));
+    assert!(
+        stderr(&blocked).starts_with("[ratchet guardrail:main-tree]"),
+        "{}",
+        stderr(&blocked)
+    );
+}
+
+#[test]
+fn agent_protocol__interpreter_write_is_not_blocked_before_the_fact() {
+    let sb = sandbox();
+    let root = sb.root();
+    // Spec text: `python - <<'EOF' … EOF`. Bare `python` in a repo with `.venv` trips the
+    // separate `python-venv` rule before the main-tree question is even reached, so this uses
+    // `uv run python` to isolate the shape under test (interpreter writes vs. recognised
+    // redirection/`sed -i`/etc. shapes) from that unrelated rule.
+    let cmd = "uv run python - <<'EOF'\nopen('tracked.txt', 'w').write('bye')\nEOF";
+    let out = hook_in(&sb, "pre-tool", &bash(cmd, &root), &root);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    // Companion assertion: a recognised shape against the very same file still blocks, so the
+    // allow above is specific to the interpreter shape, not a blanket pass on that path.
+    let blocked = hook_in(
+        &sb,
+        "pre-tool",
+        &bash("sed -i '' 's/a/b/' tracked.txt", &root),
+        &root,
+    );
+    assert_eq!(code(&blocked), 2, "stderr: {}", stderr(&blocked));
+    assert!(
+        stderr(&blocked).starts_with("[ratchet guardrail:main-tree]"),
+        "{}",
+        stderr(&blocked)
+    );
+}
+
+#[test]
 fn agent_protocol__rule_disabled_per_repo() {
     let sb = sandbox();
     sb.write_marker(
@@ -372,6 +486,129 @@ fn agent_protocol__machine_wide_rule_overrides_a_built_in() {
         stderr(&out).starts_with("[ratchet guardrail:git-destructive] Machine says no."),
         "{}",
         stderr(&out)
+    );
+}
+
+// --- Requirement: Main-tree writes detected after the fact -------------------------
+
+#[test]
+fn agent_protocol__a_bash_command_that_changed_a_tracked_main_tree_file_is_reported_after_the_fact()
+{
+    let session = "s-mt-reported";
+    // `board`, not `sandbox`, so the state database (and its `events` table) already exists —
+    // the scenario is about what gets recorded once a snapshot exists, not about bootstrapping.
+    let sb = board(session);
+    let root = sb.root();
+    let payload = bash(
+        "uv run python - <<'EOF'\nopen('tracked.txt', 'w').write('bye')\nEOF",
+        &root,
+    );
+    let pre = hook_env(
+        &sb,
+        "pre-tool",
+        &payload,
+        &root,
+        &[("RATCHET_SESSION_ID", session), ("RATCHET_NOW", &at(1))],
+    );
+    assert_eq!(code(&pre), 0, "pre-tool stderr: {}", stderr(&pre));
+    // Simulate the command's effect: an interpreter heredoc rewrote the tracked file, which the
+    // pre-tool hook does not (and cannot) block before the fact.
+    fs::write(root.join("tracked.txt"), "bye").unwrap();
+    let post = hook_env(
+        &sb,
+        "post-tool",
+        &post_tool(&payload),
+        &root,
+        &[("RATCHET_SESSION_ID", session), ("RATCHET_NOW", &at(2))],
+    );
+    assert_eq!(code(&post), 0, "post-tool stderr: {}", stderr(&post));
+    assert_eq!(stdout(&post), "");
+    let err = stderr(&post);
+    assert_eq!(err.lines().count(), 1, "expected exactly one line: {err:?}");
+    assert!(err.contains("[ratchet guardrail:main-tree]"), "{err}");
+    assert!(err.contains("tracked.txt"), "{err}");
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND kind = 'guardrail.main_tree_write'",
+            &[session]
+        ),
+        1
+    );
+    let payloads = session_event_payloads(&sb, session, "guardrail.main_tree_write");
+    assert_eq!(payloads.len(), 1);
+    assert!(payloads[0].contains("tracked.txt"), "{:?}", payloads[0]);
+}
+
+#[test]
+fn agent_protocol__post_check_is_silent_when_nothing_tracked_changed() {
+    let session = "s-mt-silent-untracked";
+    let sb = board(session);
+    let root = sb.root();
+    let payload = bash(
+        "uv run python - <<'EOF'\nopen('scratch.md', 'w').write('draft')\nEOF",
+        &root,
+    );
+    let pre = hook_env(
+        &sb,
+        "pre-tool",
+        &payload,
+        &root,
+        &[("RATCHET_SESSION_ID", session), ("RATCHET_NOW", &at(1))],
+    );
+    assert_eq!(code(&pre), 0, "pre-tool stderr: {}", stderr(&pre));
+    // Simulate the command's effect: only a new, untracked file appeared in the main tree.
+    fs::write(root.join("scratch.md"), "draft").unwrap();
+    let post = hook_env(
+        &sb,
+        "post-tool",
+        &post_tool(&payload),
+        &root,
+        &[("RATCHET_SESSION_ID", session), ("RATCHET_NOW", &at(2))],
+    );
+    assert_eq!(code(&post), 0, "post-tool stderr: {}", stderr(&post));
+    assert_eq!(stdout(&post), "");
+    assert_eq!(stderr(&post), "");
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND kind = 'guardrail.main_tree_write'",
+            &[session]
+        ),
+        0
+    );
+}
+
+#[test]
+fn agent_protocol__post_check_without_a_prior_snapshot_is_silent() {
+    let session = "s-mt-no-snapshot";
+    // The session is registered (so the database exists), but no `pre-tool` hook call ever ran
+    // for this Bash command in that session, so no "before" snapshot was recorded for it.
+    let sb = board(session);
+    let root = sb.root();
+    let payload = bash(
+        "uv run python - <<'EOF'\nopen('tracked.txt', 'w').write('bye')\nEOF",
+        &root,
+    );
+    // Even though the tracked file really did change:
+    fs::write(root.join("tracked.txt"), "bye").unwrap();
+    let post = hook_env(
+        &sb,
+        "post-tool",
+        &post_tool(&payload),
+        &root,
+        &[("RATCHET_SESSION_ID", session), ("RATCHET_NOW", &at(1))],
+    );
+    assert_eq!(code(&post), 0, "post-tool stderr: {}", stderr(&post));
+    assert_eq!(stdout(&post), "");
+    assert_eq!(stderr(&post), "");
+    assert_eq!(
+        count(
+            &sb,
+            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND kind = 'guardrail.main_tree_write'",
+            &[session]
+        ),
+        0
     );
 }
 

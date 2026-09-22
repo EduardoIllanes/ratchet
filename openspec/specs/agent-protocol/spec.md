@@ -123,6 +123,18 @@ the id of an existing one SHALL replace it; a repo SHALL be able to disable a ru
 - **WHEN** the tool call is a `python - <<'EOF' … EOF` heredoc that rewrites a tracked main-tree file, through `Bash`
 - **THEN** the pre-tool hook allows it
 
+#### Scenario: Rule disabled per repo
+- **WHEN** `ratchet.toml` lists `python-venv` under `guardrails.off` and the tool call is `python scripts/x.py`
+- **THEN** the hook allows it
+
+#### Scenario: Custom content rule from the repo
+- **WHEN** the repo's extra rules file defines a `content` rule blocking `\.purge_all\s*\(` and a `Write` has that text in its content
+- **THEN** the hook blocks with the id and message of that rule
+
+#### Scenario: Machine-wide rule overrides a built-in
+- **WHEN** the machine rules file redefines `git-destructive` with a different message and the tool call is `git reset --hard`
+- **THEN** the hook blocks with the machine message
+
 ### Requirement: Main-tree writes detected after the fact
 In PostToolUse for `Bash` and `PowerShell` inside an opted-in repo, ratchet SHALL compare the
 set of modified tracked files of the main tree (`git status --porcelain --untracked-files=no`
@@ -145,18 +157,6 @@ changed, and SHALL stay within the hook's time budget: at most one `git status` 
 #### Scenario: Post-check without a prior snapshot is silent
 - **WHEN** the post-tool hook runs for a `Bash` call whose PreToolUse never recorded a snapshot for this session
 - **THEN** stdout and stderr are empty and exit 0
-
-#### Scenario: Rule disabled per repo
-- **WHEN** `ratchet.toml` lists `python-venv` under `guardrails.off` and the tool call is `python scripts/x.py`
-- **THEN** the hook allows it
-
-#### Scenario: Custom content rule from the repo
-- **WHEN** the repo's extra rules file defines a `content` rule blocking `\.purge_all\s*\(` and a `Write` has that text in its content
-- **THEN** the hook blocks with the id and message of that rule
-
-#### Scenario: Machine-wide rule overrides a built-in
-- **WHEN** the machine rules file redefines `git-destructive` with a different message and the tool call is `git reset --hard`
-- **THEN** the hook blocks with the machine message
 
 ### Requirement: Hooks never break a session
 On any internal error (invalid config, malformed payload, unexpected failure) a hook SHALL
