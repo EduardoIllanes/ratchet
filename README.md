@@ -295,6 +295,39 @@ past 150 lines — over the cap, the deepest directories collapse into one summa
 `.ratchet/` to `.gitignore`, not `ratchet map` on its own. Configure `[map] exclude` and
 `[map] gate` in `ratchet.toml` when the defaults don't fit a repo.
 
+## Usage
+
+`ratchet usage` reports token cost per task, role and model, read straight from the transcripts
+Claude Code already writes under `~/.claude/projects` (or `RATCHET_CLAUDE_PROJECTS`) and joined
+with the sessions/task events ratchet already records — no extra tracking, nothing to opt into.
+Plain `ratchet usage` lists every task touched in the current repo's window, one line each
+(status, review rounds, abbreviated tokens, title, cost when weights are configured); a trailing
+`skipped N partial N version X` line appears only when the scan actually met something it
+couldn't fully read.
+
+- `ratchet usage <id>` shows one task in detail: tokens per role/model, orientation (the
+  orchestrator's cost before the first claim), tokens per review round, orchestrator share, cache
+  efficiency, and cost.
+- `ratchet usage --by task|role|model|session` aggregates across the whole window instead of
+  listing tasks; `--by role` also adds review rounds per task and orientation per session.
+- `--since 7d|30d|<RFC 3339 date>` widens or narrows the window (default `7d`); `--all-repos`
+  drops the repo filter and reports across every repo ratchet knows about; `--json` prints the
+  same data as JSON (raw, unabbreviated numbers) instead of the terminal text.
+
+Cost is only ever shown when every bucket contributing to a number matched a configured weight.
+Configure weights in the machine config (`~/.ratchet/config.toml`), keyed by model name prefix
+and matched longest-prefix-first, so a more specific prefix overrides a shorter one:
+
+    [usage.weights]
+    "claude-sonnet" = { input = 3.0, cache_write = 3.75, cache_read = 0.3, output = 15.0 }
+    "claude-sonnet-5" = { input = 2.5, cache_write = 3.0, cache_read = 0.25, output = 12.0 }
+
+`ratchet usage <id> --note` is the command's only write: it appends a task note starting with
+`usage:` that holds the same one-task summary paragraph the `<id>` detail view is built from
+(total tokens, rounds, orientation, cost), through the same `services::tasks::note` write
+`ratchet task note` uses — attributed to the same session, refused with the identical message on
+a task that doesn't exist. Without `--note`, `ratchet usage` never writes anything.
+
 ## Build from source
 
 

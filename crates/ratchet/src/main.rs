@@ -13,6 +13,7 @@ mod output;
 mod pdf;
 mod repo;
 mod services;
+mod usage;
 
 use std::collections::HashMap;
 
@@ -91,6 +92,25 @@ enum Cmd {
         /// Force OCR from the start; skips the fast pass.
         #[arg(long)]
         ocr: bool,
+    },
+    /// Token cost per task, role and model, read from Claude Code's own transcripts.
+    Usage {
+        /// Show one task instead of the window's listing.
+        id: Option<String>,
+        /// Aggregate across the window: task, role, model or session.
+        #[arg(long)]
+        by: Option<String>,
+        /// Window: "7d", "30d" or a date (default 7d).
+        #[arg(long)]
+        since: Option<String>,
+        /// Drop the repo filter.
+        #[arg(long = "all-repos")]
+        all_repos: bool,
+        #[arg(long)]
+        json: bool,
+        /// Append the one-task summary as a note on `<id>` (requires `<id>`).
+        #[arg(long)]
+        note: bool,
     },
 }
 
@@ -446,6 +466,24 @@ fn main() {
             None => cli::map_cmd::generate(wire, &env, cwd),
         },
         Cmd::Pdf { file, pages, ocr } => cli::pdf_cmd::run(&file, pages.as_deref(), ocr, &env),
+        Cmd::Usage {
+            id,
+            by,
+            since,
+            all_repos,
+            json,
+            note,
+        } => cli::usage_cmd::run(
+            &env,
+            cwd,
+            session.as_deref(),
+            id.as_deref(),
+            by.as_deref(),
+            since.as_deref(),
+            all_repos,
+            json,
+            note,
+        ),
     };
     std::process::exit(code);
 }

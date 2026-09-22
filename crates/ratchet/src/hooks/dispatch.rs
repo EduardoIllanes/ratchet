@@ -143,8 +143,9 @@ fn snapshot_dir(home: &Path) -> PathBuf {
 /// every other character with `_`. This is what keeps such an identifier from ever introducing a
 /// path separator, a `..` segment, or (via `Path::join`'s "an absolute argument replaces the
 /// base" rule) turning a join into an absolute path of its own. Shared by every path built from
-/// one of these identifiers.
-fn sanitize_id(raw: &str) -> String {
+/// one of these identifiers -- `pub(crate)` so `usage::transcript` (whose `session_id` comes from
+/// the same hook-populated `sessions` table) reuses this one rule instead of a second copy.
+pub(crate) fn sanitize_id(raw: &str) -> String {
     raw.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
