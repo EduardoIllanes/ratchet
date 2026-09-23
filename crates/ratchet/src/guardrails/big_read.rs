@@ -16,11 +16,12 @@
 
 use std::fs;
 use std::io::BufRead;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
 
 use super::eval::GuardContext;
+use super::paths::resolve_tool_path;
 use super::segment::tokenize;
 use crate::repo::within;
 
@@ -92,10 +93,7 @@ fn reader_command_targets(segment: &str) -> Vec<String> {
 }
 
 fn is_big_outside_worktree(raw: &str, ctx: &GuardContext) -> bool {
-    let mut target = PathBuf::from(raw);
-    if !target.is_absolute() {
-        target = ctx.cwd.join(target);
-    }
+    let target = resolve_tool_path(raw, &ctx.cwd, cfg!(windows));
     if let Some(wt) = ctx.worktrees_dir.as_deref() {
         if within(&target, wt) {
             return false;

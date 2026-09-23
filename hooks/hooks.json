@@ -8,7 +8,7 @@
       { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" hook prompt", "shell": "bash", "timeout": 10 } ] }
     ],
     "PreToolUse": [
-      { "matcher": "Bash|PowerShell|Edit|Write|NotebookEdit|MultiEdit",
+      { "matcher": "Bash|PowerShell|Edit|Write|NotebookEdit|MultiEdit|Read",
         "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" hook pre-tool", "shell": "bash", "timeout": 10 } ] }
     ],
     "PostToolUse": [
