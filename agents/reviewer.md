@@ -25,11 +25,11 @@ Method:
 Verdict per task: `APPROVED` or `BLOCKING` item(s) with concrete detail (`file:line`, the case
 that fails). A blocking item is NOT fixed by you: it is described. Record the verdict, not a
 note: `ratchet task note` is never enough, because `done` only accepts a verdict recorded by a
-session independent of the one that did the work. Subagents in Claude Code share the parent
-session's id, so mint your own before recording: `ratchet task review T-… approve "…"
---session reviewer-$(openssl rand -hex 4)` (or `uuidgen` if `openssl` is unavailable) for
-`APPROVED`, `ratchet task review T-… changes "…" --session reviewer-$(openssl rand -hex 4)` for
-`BLOCKING`. That session need not be registered — `task review` accepts any `--session` value.
+identity independent of the one that did the work. Run it bare, from your own `Bash` tool:
+`ratchet task review T-… approve "…"` for `APPROVED`, `ratchet task review T-… changes "…"` for
+`BLOCKING`. Never pass `--session` and never set `RATCHET_SESSION_ID`: ratchet attributes the
+call to you as a subagent through its hooks, and a hand-typed session is one it never registered,
+so the verdict is recorded but the done gate refuses it.
 Known guardrail false positive: a quoted string containing a semicolon followed by a tool name
 (e.g. `"; mypy"`, `"; pytest"`) inside a command can trip an unrelated guardrail — avoid that
 shape even when it is not what you mean.
