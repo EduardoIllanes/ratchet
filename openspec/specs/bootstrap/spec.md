@@ -46,3 +46,20 @@ skills and hooks reach users without a binary release.
 #### Scenario: Download failure names the manual path
 - **WHEN** `RATCHET_RELEASE_BASE` points at a directory without the asset
 - **THEN** the wrapper exits 0, stderr has one line containing `download failed` and `RATCHET_BIN`, and the stamp exists
+
+### Requirement: The wrapper propagates the binary's exit code
+`hooks/run-hook.cmd` SHALL exit with exactly the wrapped binary's exit code, on every platform it
+runs on. In particular, when Windows dispatches to this polyglot file's batch half through
+`cmd.exe` — as happens when Claude Code invokes the `.cmd` path through Git Bash, which hands the
+file to `cmd.exe` — a blocking exit code from the binary SHALL still reach the caller unchanged.
+A guardrail block (binary exit 2) SHALL never be turned into exit 0.
+
+#### Scenario: A blocking exit code survives the Windows wrapper
+- **WHEN** on Windows the wrapper is run through `cmd.exe`, and through Git Bash invoking the
+  `.cmd` path as Claude Code does, with `hook pre-tool` and a payload the binary blocks (exit 2)
+- **THEN** the wrapper exits 2 and stderr carries the block message
+
+#### Scenario: A blocking exit code survives the wrapper on unix
+- **WHEN** on unix the wrapper is run with `hook pre-tool` and a payload the binary blocks
+  (exit 2)
+- **THEN** the wrapper exits 2 and stderr carries the block message
