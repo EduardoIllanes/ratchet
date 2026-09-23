@@ -96,16 +96,21 @@ mod tests {
 
     /// The scenario CI actually hit on Windows: git prints a `/`-separated absolute path
     /// (drive letter included), which must come back fully native-separated, not mixed.
+    ///
+    /// The expected value is built as a literal string, not via repeated `Path::join`: joining
+    /// onto a bare drive prefix like `Path::new("C:")` does not insert a separator (`"C:"
+    /// .join("Users")` is the drive-relative path `"C:Users"`, not `"C:\Users"`), so that
+    /// construction would silently assert the wrong thing on Windows.
     #[test]
     fn native_path_rebuilds_a_git_style_forward_slash_path_natively() {
         let git_printed = Path::new("C:/Users/runneradmin/AppData/Local/Temp/.tmpvLAwlO");
-        let expected = Path::new("C:")
-            .join("Users")
-            .join("runneradmin")
-            .join("AppData")
-            .join("Local")
-            .join("Temp")
-            .join(".tmpvLAwlO");
+        let expected = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\runneradmin\AppData\Local\Temp\.tmpvLAwlO")
+        } else {
+            // No drive-letter concept off Windows: `/` is already the native separator, so the
+            // git-printed form is left as-is.
+            git_printed.to_path_buf()
+        };
         assert_eq!(native_path(git_printed), expected);
     }
 
