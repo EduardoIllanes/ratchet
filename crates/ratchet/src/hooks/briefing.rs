@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 
 use crate::config::Thresholds;
-use crate::guardrails::rules::DroppedRule;
+use crate::guardrails::rules::{BrokenLayer, DroppedRule};
 use crate::model::{Session, Task, TaskStatus};
 use crate::output;
 use crate::services::tasks;
@@ -23,8 +23,10 @@ pub const COMMANDS_LINE: &str =
 
 /// The `[ratchet]` briefing. `dropped_rules` adds one line per guardrail rule dropped this load
 /// (T-0015: a rule that fails validation is left out of the merged set, not fatal, so the repo
-/// owner needs to learn about it somewhere other than `ratchet.log`); pass `&[]` when there are
-/// none.
+/// owner needs to learn about it somewhere other than `ratchet.log`); `broken_layers` adds one
+/// line per whole guardrail layer -- the repo's own marker, or a machine/repo `extra` file --
+/// that could not be read or parsed at all this load (T-0017), same reasoning. Pass `&[]` for
+/// either when there are none.
 pub fn build_full(
     conn: &Connection,
     session: &Session,
@@ -32,6 +34,7 @@ pub fn build_full(
     th: &Thresholds,
     now: DateTime<Utc>,
     dropped_rules: &[DroppedRule],
+    broken_layers: &[BrokenLayer],
 ) -> String {
     let header = format!(
         "[ratchet] repo {} · session {} · branch {}",
@@ -40,7 +43,14 @@ pub fn build_full(
         session.branch.as_deref().unwrap_or("?")
     );
     let rules_line = agents_md_line(main_root);
-    let dropped_lines: Vec<String> = dropped_rules.iter().map(dropped_rule_line).collect();
+    // Broken layers first (a whole file unreadable is more fundamental than one bad rule inside
+    // an otherwise-valid file), then dropped rules; both stay in the briefing unconditionally,
+    // same as the dropped-rule line before T-0017.
+    let notice_lines: Vec<String> = broken_layers
+        .iter()
+        .map(broken_layer_line)
+        .chain(dropped_rules.iter().map(dropped_rule_line))
+        .collect();
     let map_line = crate::map::briefing_line(main_root);
     let orphans = tasks::orphaned(conn, &session.repo_root, th, now).unwrap_or_default();
     let mine = tasks::list(
@@ -68,13 +78,13 @@ pub fn build_full(
     if orphans.is_empty() && mine.is_empty() && ready.is_empty() {
         let mut lines = vec![header];
         lines.extend(rules_line.clone());
-        lines.extend(dropped_lines.clone());
+        lines.extend(notice_lines.clone());
         lines.extend(map_line.clone());
         return lines.join("\n");
     }
     let mut lines = vec![header];
     lines.extend(rules_line.clone());
-    lines.extend(dropped_lines.clone());
+    lines.extend(notice_lines.clone());
     if !mine.is_empty() {
         lines.push("Your tasks in progress:".to_string());
         lines.extend(mine.iter().map(|t| task_line(conn, t, true)));
@@ -94,11 +104,12 @@ pub fn build_full(
     }
     lines.push(COMMANDS_LINE.to_string());
     // The map line is dropped first (design §4.3): only inserted when the rest already fits.
-    // The rules line and the dropped-rule lines (just added above, if any) always stay; they
-    // sit right after the header, so the map line goes that many slots further in.
+    // The rules line and the notice lines (broken-layer then dropped-rule, just added above, if
+    // any) always stay; they sit right after the header, so the map line goes that many slots
+    // further in.
     if let Some(l) = &map_line {
         if lines.len() < MAX_LINES {
-            let insert_at = 1 + rules_line.is_some() as usize + dropped_lines.len();
+            let insert_at = 1 + rules_line.is_some() as usize + notice_lines.len();
             lines.insert(insert_at, l.clone());
         }
     }
@@ -118,6 +129,18 @@ fn dropped_rule_line(d: &DroppedRule) -> String {
         d.id,
         d.file.display(),
         quote(&d.reason, 80)
+    )
+}
+
+/// One line naming a whole guardrail layer -- the repo's own marker, or a machine/repo `extra`
+/// file -- that could not be read or parsed at all this load (T-0017), the reason, and that the
+/// owner should fix it. The repo stays opted in: built-ins, and every other layer that DID parse,
+/// still apply -- this line is the only place (besides `ratchet.log`) the owner learns about it.
+fn broken_layer_line(b: &BrokenLayer) -> String {
+    format!(
+        "[ratchet] {} could not be read ({}); built-ins and other layers still enforced -- fix it",
+        b.file.display(),
+        quote(&b.reason, 80)
     )
 }
 
@@ -466,6 +489,7 @@ mod tests {
             &Thresholds::default(),
             at("2026-09-16T12:01:00Z"),
             &[],
+            &[],
         );
         assert_eq!(text.lines().count(), 2, "{text}");
         // G2-P7(a): `short("session-abcdef0123")` keeps the hyphen inside its 8-char window, so
@@ -493,6 +517,7 @@ mod tests {
             &Thresholds::default(),
             at("2026-09-16T12:01:00Z"),
             &[],
+            &[],
         );
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.get(1), Some(&"rules: AGENTS.md"), "{text}");
@@ -512,6 +537,7 @@ mod tests {
             Path::new("root"),
             &Thresholds::default(),
             at("2026-09-16T12:01:00Z"),
+            &[],
             &[],
         );
         assert!(!text.contains("AGENTS.md"), "{text}");
@@ -552,6 +578,7 @@ mod tests {
             d.path(),
             &Thresholds::default(),
             at("2026-09-16T12:01:00Z"),
+            &[],
             &[],
         );
         assert_eq!(text.lines().count(), 1, "{text}");
@@ -633,6 +660,7 @@ mod tests {
             &Thresholds::default(),
             now,
             &[],
+            &[],
         );
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with("[ratchet] repo demo"), "{text}");
@@ -678,6 +706,7 @@ mod tests {
             Path::new("root"),
             &Thresholds::default(),
             at("2026-09-16T12:02:00Z"),
+            &[],
             &[],
         );
         // G2-P7(b): `format_task_line`'s `{:<12}` pads the status "ready" with trailing spaces,
@@ -731,6 +760,7 @@ mod tests {
             Path::new("root"),
             &Thresholds::default(),
             at("2026-09-16T12:03:00Z"),
+            &[],
             &[],
         );
         let lines: Vec<&str> = text.lines().collect();
