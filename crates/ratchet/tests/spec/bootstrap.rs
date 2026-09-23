@@ -5,12 +5,13 @@
 //! real test binary (`support::ratchet_bin()`) — no test touches the network.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
 
-use crate::support::{code, ratchet_bin, stderr, stdout};
+use crate::support::{bash, code, ratchet_bin, sandbox, stderr, stdout};
 
 /// The binary name the current host's bootstrap.sh would install.
 fn bin_name() -> &'static str {
@@ -57,6 +58,38 @@ fn stamp_path(root: &Path) -> PathBuf {
 
 fn installed_bin_path(root: &Path) -> PathBuf {
     root.join("bin").join(bin_name())
+}
+
+/// Copies the real test binary into a fake plugin's `bin/` (as if bootstrap had already run),
+/// executable on unix. Shared by the two exit-code-propagation tests below, which need an
+/// already-installed binary so the wrapper runs it directly instead of bootstrapping first.
+fn install_test_binary(root: &Path) {
+    let bin_path = installed_bin_path(root);
+    fs::copy(ratchet_bin(), &bin_path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = fs::metadata(&bin_path).unwrap().permissions();
+        perm.set_mode(0o755);
+        fs::set_permissions(&bin_path, perm).unwrap();
+    }
+}
+
+/// Pipes `stdin_text` to `cmd` and collects its output — the same shape as `run_wrapper`/
+/// `run_bootstrap`, but for a `Command` that isn't necessarily invoking the wrapper as its first
+/// argument (the Windows scenario drives `cmd.exe` and `bash -c` directly).
+fn spawn_with_stdin(cmd: &mut Command, stdin_text: &str) -> Output {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin_text.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
 }
 
 /// A fresh plugin directory: a version-less `.claude-plugin/plugin.json`,
@@ -584,5 +617,126 @@ fn bootstrap__download_failure_names_the_manual_path() {
     assert!(
         derr3.contains("download failed (SHA256SUMS.txt)"),
         "{derr3}"
+    );
+}
+
+// --- Requirement: The wrapper propagates the binary's exit code ---------------------------
+//
+// These two scenarios use a *separate* fixture pair from the bootstrap scenarios above: a fake
+// plugin dir (`fake_plugin` + `install_test_binary`, standing in for `<plugin>/hooks/`) and a
+// real `sandbox()` repo (`ratchet.toml` + `.venv/` present, standing in for the user's repo the
+// hook payload's `cwd` points at). The wrapper only ever execs the installed binary, so pointing
+// `RATCHET_RELEASE_BASE` anywhere is unnecessary here — no bootstrap path is exercised.
+//
+// The payload (`Bash "python scripts/x.py"`) trips the `python-venv` builtin guardrail, which
+// the binary reports as exit 2 with stderr starting `[ratchet guardrail:python-venv]` (see
+// `agent_protocol.rs`'s `marker_found_from_a_subdirectory` for the same shape driven directly
+// against the binary, without going through the wrapper at all).
+
+#[test]
+#[cfg(windows)]
+fn bootstrap__a_blocking_exit_code_survives_the_windows_wrapper() {
+    let plugin = fake_plugin(VERSION);
+    let root = plugin.path();
+    install_test_binary(root);
+    let wrapper = root.join("hooks/run-hook.cmd");
+
+    let sb = sandbox();
+    let payload = bash("python scripts/x.py", &sb.root()).to_string();
+
+    // (a) cmd.exe reaching the batch half directly, as it would once Git Bash hands it the
+    // .cmd path (see (b) below) — this is the half that actually contains the bug.
+    let mut cmd_exe = Command::new("cmd.exe");
+    cmd_exe
+        .arg("/d")
+        .arg("/c")
+        .arg(&wrapper)
+        .arg("hook")
+        .arg("pre-tool")
+        .env("RATCHET_HOME", sb.home.path())
+        .env("CLAUDE_SCRATCHPAD", sb.scratchpad.path())
+        .env_remove("RATCHET_BIN")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    let out_cmd = spawn_with_stdin(&mut cmd_exe, &payload);
+    assert_eq!(
+        code(&out_cmd),
+        2,
+        "cmd.exe /c run-hook.cmd stdout: {} stderr: {}",
+        stdout(&out_cmd),
+        stderr(&out_cmd)
+    );
+    assert!(
+        stderr(&out_cmd).starts_with("[ratchet guardrail:python-venv]"),
+        "{}",
+        stderr(&out_cmd)
+    );
+
+    // (b) Git Bash invoking the .cmd path exactly as Claude Code does: it hands the file to
+    // cmd.exe, which re-enters the same batch half as (a).
+    let bash_cmd = format!("\"{}\" hook pre-tool", wrapper.display());
+    let mut git_bash = Command::new(resolve_bash());
+    git_bash
+        .arg("-c")
+        .arg(&bash_cmd)
+        .env("RATCHET_HOME", sb.home.path())
+        .env("CLAUDE_SCRATCHPAD", sb.scratchpad.path())
+        .env_remove("RATCHET_BIN")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    let out_bash = spawn_with_stdin(&mut git_bash, &payload);
+    assert_eq!(
+        code(&out_bash),
+        2,
+        "git bash -c '\"run-hook.cmd\" hook pre-tool' stdout: {} stderr: {}",
+        stdout(&out_bash),
+        stderr(&out_bash)
+    );
+    assert!(
+        stderr(&out_bash).starts_with("[ratchet guardrail:python-venv]"),
+        "{}",
+        stderr(&out_bash)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn bootstrap__a_blocking_exit_code_survives_the_wrapper_on_unix() {
+    let plugin = fake_plugin(VERSION);
+    let root = plugin.path();
+    install_test_binary(root);
+    let wrapper = root.join("hooks/run-hook.cmd");
+
+    let sb = sandbox();
+    let payload = bash("python scripts/x.py", &sb.root()).to_string();
+
+    // The sh half of the polyglot file, run exactly as Claude Code runs it on macOS/Linux
+    // ("Claude Code runs the command line through /bin/sh" per the wrapper's own header
+    // comment) — this must already pass, as a regression guard while the batch half is fixed.
+    let mut sh = Command::new("sh");
+    sh.arg(&wrapper)
+        .arg("hook")
+        .arg("pre-tool")
+        .env("RATCHET_HOME", sb.home.path())
+        .env("CLAUDE_SCRATCHPAD", sb.scratchpad.path())
+        .env_remove("RATCHET_BIN")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    let out = spawn_with_stdin(&mut sh, &payload);
+
+    assert_eq!(
+        code(&out),
+        2,
+        "sh run-hook.cmd stdout: {} stderr: {}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).starts_with("[ratchet guardrail:python-venv]"),
+        "{}",
+        stderr(&out)
     );
 }
