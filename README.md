@@ -222,7 +222,10 @@ Three things the harness does with the board, without being asked:
 
 Any command that would print more than 60 lines writes them to `~/.ratchet/out/<timestamp>-<name>.txt`
 instead and prints the first 20 plus that path. `--json` gives the machine-readable form of any
-board, session or db command; `--session <id>` attributes a write explicitly and is accepted anywhere on the line.
+board, session or db command; `--session <id>` attributes a write explicitly and is accepted anywhere on
+the line, but it can never name a subagent (a value with `/` is refused) — a board write made from
+inside a subagent's own `Bash` call is attributed to that subagent automatically, by matching the
+call against the task id and subcommand, never by a flag.
 
 ## State and sessions
 
