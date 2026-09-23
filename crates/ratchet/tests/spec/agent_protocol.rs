@@ -489,6 +489,207 @@ fn agent_protocol__machine_wide_rule_overrides_a_built_in() {
     );
 }
 
+#[test]
+fn agent_protocol__custom_rule_declared_inline_in_ratchet_toml_blocks() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"no-curl\"\nmatch = '^\\s*curl\\b'\nmessage = \"Use the repo's fetch script instead.\"\n",
+    );
+    let root = sb.root();
+    let out = hook_in(
+        &sb,
+        "pre-tool",
+        &bash("curl https://example.com", &root),
+        &root,
+    );
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert_eq!(
+        stderr(&out).trim(),
+        "[ratchet guardrail:no-curl] Use the repo's fetch script instead."
+    );
+    let ok = hook_in(&sb, "pre-tool", &bash("echo hi", &root), &root);
+    assert_eq!(code(&ok), 0, "stderr: {}", stderr(&ok));
+}
+
+#[test]
+fn agent_protocol__inline_custom_rule_evaluates_after_the_built_ins() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"catch-all-force\"\nmatch = 'force'\nmessage = \"Use a reversible alternative instead.\"\n",
+    );
+    let root = sb.root();
+    let out = hook_in(
+        &sb,
+        "pre-tool",
+        &bash("git push --force origin main", &root),
+        &root,
+    );
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("[ratchet guardrail:git-destructive]"),
+        "the built-in still wins over an overlapping inline rule: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn agent_protocol__inline_custom_rule_with_an_unknown_key_is_refused() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"x\"\nmatch = 'y'\nmessage = \"use z instead\"\nbogus = 1\n",
+    );
+    let root = sb.root();
+    let out = guardrails(&sb, &["list"], &root);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    assert!(stderr(&out).contains("ratchet.toml"), "{}", stderr(&out));
+}
+
+#[test]
+fn agent_protocol__inline_custom_rule_with_an_empty_message_is_refused() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"no-curl\"\nmatch = '^curl'\nmessage = \"\"\n",
+    );
+    let root = sb.root();
+    let out = guardrails(&sb, &["list"], &root);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    assert!(stderr(&out).contains("no-curl"), "{}", stderr(&out));
+}
+
+#[test]
+fn agent_protocol__inline_custom_rule_with_no_stated_alternative_is_refused() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"no-curl\"\nmatch = '^curl'\nmessage = \"Curl is not allowed here.\"\n",
+    );
+    let root = sb.root();
+    let out = guardrails(&sb, &["list"], &root);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    assert!(stderr(&out).contains("no-curl"), "{}", stderr(&out));
+}
+
+#[test]
+fn agent_protocol__inline_rule_colliding_with_a_builtin_id_is_refused() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"env-files\"\nmatch = 'never-matches-anything'\nmessage = \"use x instead\"\n",
+    );
+    let root = sb.root();
+    let out = guardrails(&sb, &["list"], &root);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("env-files"), "{err}");
+    assert!(err.contains("ratchet.toml"), "{err}");
+    assert!(
+        err.contains("off") || err.contains("rename") || err.contains("another name"),
+        "expected the alternative (rename or `off = [...]`) in: {err}"
+    );
+}
+
+#[test]
+fn agent_protocol__inline_rule_colliding_with_a_non_command_builtin_id_is_refused() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"main-tree\"\nmatch = 'never-matches-anything'\nmessage = \"use x instead\"\n",
+    );
+    let root = sb.root();
+    let out = guardrails(&sb, &["list"], &root);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    assert!(stderr(&out).contains("main-tree"), "{}", stderr(&out));
+}
+
+#[test]
+fn agent_protocol__inline_custom_rule_with_empty_tools_is_refused() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"no-curl\"\nmatch = '^curl'\nmessage = \"Use the fetch script instead.\"\ntools = []\n",
+    );
+    let root = sb.root();
+    let out = guardrails(&sb, &["list"], &root);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    assert!(stderr(&out).contains("no-curl"), "{}", stderr(&out));
+}
+
+// --- Requirement: A rule that fails validation is dropped, not fatal ---------------
+
+#[test]
+fn agent_protocol__inline_rule_named_env_files_still_leaves_the_builtin_blocking() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"env-files\"\nmatch = 'never-matches-anything'\nmessage = \"use x instead\"\n",
+    );
+    let root = sb.root();
+    let out = hook_in(
+        &sb,
+        "pre-tool",
+        &write(&root.join(".env"), "KEY=1", &root),
+        &root,
+    );
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("[ratchet guardrail:env-files]"),
+        "the builtin should still block even though the same-named inline rule was invalid: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn agent_protocol__inline_rule_named_main_tree_still_leaves_the_builtin_blocking() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"main-tree\"\nmatch = 'never-matches-anything'\nmessage = \"use x instead\"\n",
+    );
+    let root = sb.root();
+    let out = hook_in(
+        &sb,
+        "pre-tool",
+        &edit(&root.join("tracked.txt"), "bye", &root),
+        &root,
+    );
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("[ratchet guardrail:main-tree]"),
+        "the builtin should still block even though the same-named inline rule was invalid: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn agent_protocol__a_bad_regex_drops_only_its_own_rule() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n\
+         [[guardrails.rules]]\nname = \"broken-regex\"\nmatch = '('\nmessage = \"use x instead\"\n\n\
+         [[guardrails.rules]]\nname = \"no-curl\"\nmatch = '^\\s*curl\\b'\nmessage = \"Use the repo's fetch script instead.\"\n",
+    );
+    let root = sb.root();
+    // The built-in still fires, unaffected by the sibling rule with the uncompilable regex.
+    let out = hook_in(
+        &sb,
+        "pre-tool",
+        &bash("git reset --hard HEAD~1", &root),
+        &root,
+    );
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("[ratchet guardrail:git-destructive]"),
+        "{}",
+        stderr(&out)
+    );
+    // The second, valid inline rule in the same file still evaluates and blocks its own pattern.
+    let curl_out = hook_in(
+        &sb,
+        "pre-tool",
+        &bash("curl https://example.com", &root),
+        &root,
+    );
+    assert_eq!(code(&curl_out), 2, "stderr: {}", stderr(&curl_out));
+    assert_eq!(
+        stderr(&curl_out).trim(),
+        "[ratchet guardrail:no-curl] Use the repo's fetch script instead."
+    );
+}
+
 // --- Requirement: Main-tree writes detected after the fact -------------------------
 
 #[test]
