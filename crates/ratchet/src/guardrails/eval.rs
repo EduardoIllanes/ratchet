@@ -41,12 +41,19 @@ pub struct Violation {
 }
 
 impl Violation {
+    /// A repo-declared inline rule (`[[guardrails.rules]]`, T-0012) has no separate
+    /// `alternative` — its `message` already states it — so `alternative` is the empty string
+    /// there; this omits the trailing space that a naive `"{} {}"` would otherwise leave.
     #[allow(dead_code)] // consumed by Task 9 (hooks::dispatch)
     pub fn render(&self) -> String {
-        format!(
-            "[ratchet guardrail:{}] {} {}",
-            self.rule_id, self.message, self.alternative
-        )
+        if self.alternative.is_empty() {
+            format!("[ratchet guardrail:{}] {}", self.rule_id, self.message)
+        } else {
+            format!(
+                "[ratchet guardrail:{}] {} {}",
+                self.rule_id, self.message, self.alternative
+            )
+        }
     }
 }
 
@@ -381,6 +388,19 @@ mod tests {
                 "[ratchet guardrail:python-venv] {} {}",
                 v.message, v.alternative
             )
+        );
+    }
+
+    #[test]
+    fn render_omits_the_trailing_space_when_alternative_is_empty() {
+        let v = Violation {
+            rule_id: "no-curl".into(),
+            message: "Use the repo's fetch script instead.".into(),
+            alternative: String::new(),
+        };
+        assert_eq!(
+            v.render(),
+            "[ratchet guardrail:no-curl] Use the repo's fetch script instead."
         );
     }
 

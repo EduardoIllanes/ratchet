@@ -44,6 +44,13 @@ pub struct GuardrailsSection {
     pub extra: Option<String>,
     /// Line-count threshold for the built-in `big-read` rule.
     pub big_read_lines: usize,
+    /// Rules declared inline, right in `ratchet.toml`, rather than in a separate `extra` file.
+    /// Shape (unknown keys) is refused here by `deny_unknown_fields`; the semantic checks — a
+    /// `name` that does not collide with a built-in id, a non-empty `message` that states the
+    /// alternative, a `tools` list that is not explicitly empty, a `match` that compiles — are
+    /// refused by `guardrails::rules::load_rule_set`, the same place the `extra` file's rules
+    /// are validated (T-0012, T-0015).
+    pub rules: Vec<CustomRuleDecl>,
 }
 
 impl Default for GuardrailsSection {
@@ -52,8 +59,33 @@ impl Default for GuardrailsSection {
             off: Vec::new(),
             extra: None,
             big_read_lines: DEFAULT_BIG_READ_LINES,
+            rules: Vec::new(),
         }
     }
+}
+
+/// One `[[guardrails.rules]]` entry: a repo's own guardrail rule, declared inline in
+/// `ratchet.toml` instead of a separate `extra` file. Always a `command`-kind rule (the same
+/// matcher the built-in command rules use, over each command segment) — `kind`, `exempt` and
+/// `requires` are not offered here; a repo that needs them uses the `extra` file schema instead.
+/// Because it is command-only, `name` SHALL NOT equal a built-in id (`python-venv`,
+/// `git-destructive`, `env-files`, `main-tree`, `big-read`): `merge()`'s same-id-replaces
+/// semantics would otherwise swap a non-command built-in out for a rule that can never match,
+/// silently disabling it (T-0015); checked by `guardrails::rules::load_rule_set`, not here.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomRuleDecl {
+    pub name: String,
+    /// A regex over each command segment, same as a built-in command rule's `pattern`.
+    #[serde(rename = "match")]
+    pub match_pattern: String,
+    /// SHALL itself state the alternative (contain a form of "use" or "instead"); checked by
+    /// `guardrails::rules::load_rule_set`, not here.
+    pub message: String,
+    /// Defaults to `["Bash", "PowerShell"]` when omitted; when given, SHALL NOT be empty
+    /// (checked by `guardrails::rules::load_rule_set`, not here).
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -243,6 +275,7 @@ mod tests {
         assert_eq!(c.repo.worktrees_dir, None);
         assert!(c.guardrails.off.is_empty());
         assert_eq!(c.guardrails.big_read_lines, DEFAULT_BIG_READ_LINES);
+        assert!(c.guardrails.rules.is_empty());
         assert_eq!(c.thresholds.live_minutes, 10);
         assert_eq!(c.thresholds.idle_minutes, 60);
     }
@@ -321,6 +354,32 @@ mod tests {
         let err =
             parse_repo_config("[guardrails]\nofff = []\n", Path::new("ratchet.toml")).unwrap_err();
         assert!(err.message.contains("offf"), "{}", err.message);
+    }
+
+    #[test]
+    fn inline_guardrail_rules_parse_with_and_without_tools() {
+        let text = "[[guardrails.rules]]\nname = \"no-curl\"\nmatch = '^curl'\nmessage = \"Use the fetch script instead.\"\ntools = [\"Bash\"]\n\n[[guardrails.rules]]\nname = \"no-wget\"\nmatch = '^wget'\nmessage = \"Use the fetch script instead.\"\n";
+        let c = parse_repo_config(text, Path::new("ratchet.toml")).unwrap();
+        assert_eq!(c.guardrails.rules.len(), 2);
+        assert_eq!(c.guardrails.rules[0].name, "no-curl");
+        assert_eq!(c.guardrails.rules[0].match_pattern, "^curl");
+        assert_eq!(
+            c.guardrails.rules[0].tools.as_deref(),
+            Some(&["Bash".to_string()][..])
+        );
+        assert_eq!(c.guardrails.rules[1].name, "no-wget");
+        assert_eq!(
+            c.guardrails.rules[1].tools, None,
+            "omitted tools stays None; the default set is applied when the rule is converted"
+        );
+    }
+
+    #[test]
+    fn inline_guardrail_rule_with_an_unknown_key_is_an_error() {
+        let text =
+            "[[guardrails.rules]]\nname = \"x\"\nmatch = 'y'\nmessage = \"use z instead\"\nbogus = 1\n";
+        let err = parse_repo_config(text, Path::new("ratchet.toml")).unwrap_err();
+        assert!(err.message.contains("bogus"), "{}", err.message);
     }
 
     #[test]

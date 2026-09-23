@@ -139,6 +139,21 @@ write-method names of your own driver in the pattern):
     message = "The database is read-only for agents."
     alternative = "Read through the data layer; if a write is really needed, the owner does it by hand."
 
+A one-off command rule can also live right in `ratchet.toml`, without a separate file —
+`match` is a regex over each command segment, and the `message` must itself state the
+alternative (say "use" or "instead") or the file is refused on load:
+
+    [[guardrails.rules]]
+    name = "no-curl"
+    match = '^\s*curl\b'
+    message = "Use the repo's fetch script instead."
+
+Inline rules are always command-only, so `name` must not equal a built-in id (`python-venv`,
+`git-destructive`, `env-files`, `main-tree`, `big-read`) — that would silently replace a
+non-command built-in with one that can never match. Reusing an id, or giving an explicit empty
+`tools = []`, is refused on load naming the rule and the alternative (rename it, or disable the
+built-in with `off = [...]`).
+
 Known behaviour, by design: command rules split on `;` only outside quotes, so a quoted
 `"done; mypy clean"` does not trip `python-venv`; but a `content` rule scans what will be
 written, so quoting a blocked pattern in documentation blocks that write too.
@@ -197,7 +212,8 @@ Three things the harness does with the board, without being asked:
 - **At session start** it prints a briefing of at most 40 lines: the repo, the session and the
   branch; your tasks in progress with their last handoff; the repo's tasks held by dead sessions,
   with theirs; up to five ready to take; and where the full guide is. A repo with nothing pending
-  gets one line.
+  gets one line. When the repo has an `AGENTS.md` at its root, a second line `rules: AGENTS.md`
+  points at it — the briefing never restates what is in it.
 - **On every prompt**, if you hold a task, one line: `[ratchet] T-0042 in_progress (2/5) · last
   handoff: "…"`.
 - **When the session tries to close** holding a task you recorded nothing about this turn, it is

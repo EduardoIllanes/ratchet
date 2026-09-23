@@ -100,6 +100,198 @@ fn agent_protocol__the_briefing_never_exceeds_forty_lines() {
     );
 }
 
+#[test]
+fn agent_protocol__repo_rules_line_when_agents_md_exists() {
+    let sb = sandbox();
+    sb.write("AGENTS.md", "# repo rules live here\n");
+    let root = sb.root();
+    let out = hook_env(
+        &sb,
+        "session-start",
+        &session_payload("s-rules", &root),
+        &root,
+        &[("RATCHET_NOW", T0)],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let printed = lines(&out);
+    assert_eq!(printed[1], "rules: AGENTS.md", "{printed:?}");
+    assert_eq!(
+        stdout(&out).matches("AGENTS.md").count(),
+        1,
+        "the briefing points at the file once, it does not restate it: {printed:?}"
+    );
+}
+
+#[test]
+fn agent_protocol__no_rules_line_when_agents_md_is_absent() {
+    let sb = sandbox();
+    let root = sb.root();
+    let out = hook_env(
+        &sb,
+        "session-start",
+        &session_payload("s-norules", &root),
+        &root,
+        &[("RATCHET_NOW", T0)],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(
+        !stdout(&out).contains("AGENTS.md"),
+        "unexpected rules line: {:?}",
+        lines(&out)
+    );
+}
+
+// --- Requirement: A rule that fails validation is dropped, not fatal ------------------------
+
+#[test]
+fn agent_protocol__the_briefing_names_each_rule_left_out() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\ndefault_branch = \"main\"\nworktrees_dir = \".worktrees\"\n\n[[guardrails.rules]]\nname = \"env-files\"\nmatch = 'never-matches-anything'\nmessage = \"use x instead\"\n",
+    );
+    let root = sb.root();
+    let out = hook_env(
+        &sb,
+        "session-start",
+        &session_payload("s-badrule", &root),
+        &root,
+        &[("RATCHET_NOW", T0)],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let printed = lines(&out);
+    let matches: Vec<&String> = printed
+        .iter()
+        .filter(|l| l.contains("env-files") && l.contains("ratchet.toml"))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one line naming the left-out rule and its file: {printed:?}"
+    );
+    // The spec also asks for the reason; without reading the implementation we can't assert its
+    // exact wording, so this only checks the line carries more than just the rule id and
+    // filename (a loose proxy for "and the reason").
+    assert!(
+        matches[0].len() > "env-files ratchet.toml".len() + 10,
+        "line looks too short to carry a reason: {:?}",
+        matches[0]
+    );
+}
+
+#[test]
+fn agent_protocol__no_invalid_rule_no_left_out_line() {
+    let sb = sandbox();
+    let root = sb.root();
+    let out = hook_env(
+        &sb,
+        "session-start",
+        &session_payload("s-noinvalid", &root),
+        &root,
+        &[("RATCHET_NOW", T0)],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    // No invalid rule exists in this repo's plain marker, so nothing should name the config
+    // file as the source of a dropped rule.
+    assert!(
+        !stdout(&out).contains("ratchet.toml"),
+        "unexpected left-out-rule line: {:?}",
+        lines(&out)
+    );
+}
+
+// --- Requirement: A ratchet.toml or extra rules file that fails to parse degrades to
+//     built-ins, not fail-open ---------------------------------------------------------------
+
+#[test]
+fn agent_protocol__briefing_names_the_broken_ratchet_toml_and_the_reason() {
+    let sb = sandbox();
+    sb.write_marker("[repo\nthis is = not toml");
+    let root = sb.root();
+    let out = hook_env(
+        &sb,
+        "session-start",
+        &session_payload("s-brokentoml", &root),
+        &root,
+        &[("RATCHET_NOW", T0)],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let printed = lines(&out);
+    assert!(!printed.is_empty(), "briefing should not be empty");
+    let matches: Vec<&String> = printed
+        .iter()
+        .filter(|l| l.contains("ratchet.toml"))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one line naming the broken file: {printed:?}"
+    );
+    // The spec also asks for the reason (the parse error); without reading the implementation we
+    // can't assert its exact wording, so this only checks the line carries more than just the
+    // filename -- a loose proxy for "and the reason".
+    assert!(
+        matches[0].len() > "ratchet.toml".len() + 10,
+        "line looks too short to carry a reason: {:?}",
+        matches[0]
+    );
+}
+
+#[test]
+fn agent_protocol__a_broken_extra_rules_file_still_leaves_builtins_and_inline_rules_blocking() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[guardrails]\nextra = \"ratchet/guardrails.toml\"\n\n[[guardrails.rules]]\nname = \"no-curl\"\nmatch = '^\\s*curl\\b'\nmessage = \"Use the repo's fetch script instead.\"\n",
+    );
+    sb.write("ratchet/guardrails.toml", "[[rules\nthis is = not toml");
+    let root = sb.root();
+
+    let env_out = hook_in(
+        &sb,
+        "pre-tool",
+        &write(&root.join(".env"), "KEY=1", &root),
+        &root,
+    );
+    assert_eq!(code(&env_out), 2, "stderr: {}", stderr(&env_out));
+    assert!(
+        stderr(&env_out).starts_with("[ratchet guardrail:env-files]"),
+        "{}",
+        stderr(&env_out)
+    );
+
+    let curl_out = hook_in(
+        &sb,
+        "pre-tool",
+        &bash("curl https://example.com", &root),
+        &root,
+    );
+    assert_eq!(code(&curl_out), 2, "stderr: {}", stderr(&curl_out));
+    assert!(
+        stderr(&curl_out).starts_with("[ratchet guardrail:no-curl]"),
+        "{}",
+        stderr(&curl_out)
+    );
+
+    let briefing = hook_env(
+        &sb,
+        "session-start",
+        &session_payload("s-brokenextra", &root),
+        &root,
+        &[("RATCHET_NOW", T0)],
+    );
+    assert_eq!(code(&briefing), 0, "{}", stderr(&briefing));
+    let printed = lines(&briefing);
+    assert!(!printed.is_empty(), "briefing should not be empty");
+    let matches: Vec<&String> = printed
+        .iter()
+        .filter(|l| l.contains("guardrails.toml"))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one line naming the broken extra file: {printed:?}"
+    );
+}
+
 // --- Requirement: Task reminder on every prompt ---------------------------------------------
 
 #[test]
