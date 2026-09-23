@@ -178,24 +178,57 @@ An independent review of a task SHALL be recorded as a verdict — `approve` or 
 free text, appended as a `review.verdict` event attributed to the recording session. Recording a
 verdict SHALL NOT change the task's status. The recording session need not be registered (unlike
 claiming a task): a reviewer profile records its own, unregistered session identifier. An unknown
-task or an unknown verdict word SHALL be refused, listing the two valid words.
+task or an unknown verdict word SHALL be refused, listing the two valid words. Recording is
+unconditional on registration: an unregistered session's verdict is appended and shown exactly
+like any other, even though it will not by itself satisfy the done gate below. When the
+recording session's identity is attributed to a subagent (see sessions' "A subagent's board
+write is attributed to it"), the event also carries that agent's identifier and its agent type,
+and `ratchet task show` and its history show that agent's type and the first eight characters of
+its identifier alongside the session.
 
 #### Scenario: Verdict recorded
 - **WHEN** a review verdict of `approve` with text `"looks right"` is recorded against a task
 - **THEN** one `review.verdict` event is appended carrying that verdict and that text, and the
   task's status is unchanged
 
+#### Scenario: An unregistered verdict is still recorded and listed
+- **WHEN** a review verdict is recorded by a session identifier the registry does not know
+- **THEN** the `review.verdict` event is appended and appears in `ratchet task show` and the
+  task's history like any other
+
+#### Scenario: task show shows the agent on an attributed event
+- **WHEN** a review verdict is recorded by a call attributed to a subagent
+- **THEN** `ratchet task show` shows that agent's type and the first eight characters of its
+  identifier on that verdict's line
+
 ### Requirement: Done requires an independent review
 Moving a task to `done` SHALL be refused unless its most recent `review.verdict` event is
-`approve`, recorded by a session that is neither the task's current holder nor any session that
-recorded a `task.claimed` or a `checklist.done` event on it. The refusal SHALL name the exact
+`approve`, recorded by a session that ratchet itself registered — one recorded by the
+session-start hook — and that is neither the task's current holder nor any session that recorded
+a `task.claimed` or a `checklist.done` event on it. The refusal SHALL name the exact
 `ratchet task review` command that supplies a valid verdict, and the session to record it from
 other than: the disqualified verdict's own session when there is one to point at (whether it was
 disqualified for holding the task or for a claimed/checklist.done entry in the task's history
-that is not the current holder), and the current holder when there is no verdict at all.
-`ratchet task status <id> done --unreviewed` SHALL bypass this requirement — the checklist
-requirement of "States and transitions" still applies — and SHALL record a note reading "done
-without independent review", so the bypass stays visible on the board.
+that is not the current holder), and the current holder when there is no verdict at all. When the
+most recent `approve` instead came from a session the registry does not know, the refusal SHALL
+say that the reviewer's session is not one ratchet registered, that the review must be recorded
+from a Claude Code session opened in this repo, and that `--unreviewed` remains available to the
+task's owner. `ratchet task status <id> done --unreviewed` SHALL bypass this requirement — the
+checklist requirement of "States and transitions" still applies — and SHALL record a note reading
+"done without independent review", so the bypass stays visible on the board.
+
+When the most recent `approve` is attributed to a session paired with an agent identity, the
+gate SHALL compare identities as that pair: it SHALL pass when neither a `task.claimed` nor a
+`checklist.done` event on the task carries that same pair, when a `subagent.start` event
+recorded that agent starting in that session, and when that pair is not the task's current
+holder. An approve attributed to the bare session — no agent identity — SHALL still need a
+session ratchet registered that is neither the holder nor the session of a disqualifying
+`task.claimed` or `checklist.done` event, exactly as above. Before the task moves to `done`, the
+approving identity SHALL also need a Claude Code transcript — the session's own transcript for a
+bare-session approve, or that agent's `agent-<id>.jsonl` transcript for a paired one, located the
+way `ratchet usage` locates them — containing a `Bash` tool call whose command contains
+`task review <id>`. Without that transcript the move SHALL be refused, saying the approving
+identity's transcript carries no matching review command.
 
 #### Scenario: Done refused with no verdict
 - **WHEN** a task with a complete checklist and no `review.verdict` event is moved to `done`
@@ -209,16 +242,33 @@ without independent review", so the bypass stays visible on the board.
   holding session
 
 #### Scenario: Done refused when the approve came from a session that checked off an item
-- **WHEN** a task's most recent `review.verdict` event is `approve`, recorded by a session that
-  never held the task but earlier recorded a `checklist.done` event on it, and the task is moved
-  to `done`
+- **WHEN** a task's most recent `review.verdict` event is `approve`, recorded by a session
+  ratchet registered that never held the task but earlier recorded a `checklist.done` event on
+  it, and the task is moved to `done`
 - **THEN** the operation is refused, naming that session — not the task's current holder, who
   never reviewed anything
 
+#### Scenario: Done refused when the approve came from an unregistered session
+- **WHEN** a task's most recent `review.verdict` event is `approve`, recorded by a session
+  identifier the registry does not know, and the task is moved to `done`
+- **THEN** the operation is refused, saying that session is not one ratchet registered, that the
+  review must be recorded from a Claude Code session opened in this repo, and naming
+  `--unreviewed` as the owner's option
+
 #### Scenario: Done allowed after an approve from another session
-- **WHEN** a task's checklist is complete and its most recent `review.verdict` event is `approve`,
-  recorded by a session that never claimed the task and never checked off one of its items
+- **WHEN** a task's checklist is complete, its most recent `review.verdict` event is `approve`,
+  recorded by a session ratchet registered that never claimed the task and never checked off one
+  of its items, and that session's own transcript contains a `Bash` tool call whose command
+  contains `task review <id>`
 - **THEN** the task moves to `done`
+
+#### Scenario: Done refused for a registered bare session whose transcript lacks the review
+- **WHEN** a task's most recent `review.verdict` event is `approve`, recorded by a session
+  ratchet registered — hand-registered through the session-start hook counts — that is
+  independent by every other rule, but no transcript located for that session contains a `Bash`
+  tool call whose command contains `task review <id>`
+- **THEN** the operation is refused, saying the approving identity's transcript carries no
+  matching review command
 
 #### Scenario: Done refused when a changes verdict is newer than the approve
 - **WHEN** a task received an `approve` from an independent session and then a later `changes`
@@ -231,6 +281,32 @@ without independent review", so the bypass stays visible on the board.
   and no review verdict
 - **THEN** the task moves to `done` and a note reading "done without independent review" is
   recorded
+
+#### Scenario: Done allowed for a reviewer subagent that never worked the task
+- **WHEN** a task's checklist is complete, a `subagent.start` event recorded a reviewer agent
+  starting in the holding session, that agent's approve is the task's most recent
+  `review.verdict`, neither a `task.claimed` nor a `checklist.done` event on the task carries
+  that session-and-agent pair, and a transcript for that agent contains a `Bash` tool call whose
+  command contains `task review <id>`
+- **THEN** the task moves to `done`
+
+#### Scenario: Done refused for the implementer subagent that checked items
+- **WHEN** a subagent checked off an item on a task, attributed to a session-and-agent pair, and
+  that same pair later records the task's most recent `approve`
+- **THEN** the operation is refused for the same reason as a missing verdict, naming that agent
+
+#### Scenario: Done refused for the orchestrator (bare session) that claimed
+- **WHEN** the bare session that claimed a task — no agent identity, the main thread itself —
+  later records the task's most recent `approve` from that same bare session
+- **THEN** the operation is refused for the same reason as a missing verdict, naming that
+  holding session
+
+#### Scenario: Done refused when the reviewer identity has no transcript containing the review command
+- **WHEN** a task's most recent `review.verdict` event is `approve`, attributed to a session and
+  agent pair that is independent by every other rule, but no transcript located for that
+  identity contains a `Bash` tool call whose command contains `task review <id>`
+- **THEN** the operation is refused, saying the approving identity's transcript carries no
+  matching review command
 
 ### Requirement: Archiving hides, it never deletes
 A `done` task SHALL be archivable, which hides it from listings and from the briefing while keeping

@@ -2,6 +2,7 @@
 //! hand this module bytes. Tolerant per D-usage-tolerant: nothing here ever panics or fails on a
 //! record it does not understand.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -10,6 +11,78 @@ use serde_json::Value;
 
 use crate::clock;
 use crate::hooks::dispatch::sanitize_id;
+
+/// `RATCHET_CLAUDE_PROJECTS` when set and non-empty, else `~/.claude/projects`. Checked before
+/// the database is ever opened (R1: a missing directory fails naming the path, exit 1).
+// Consumed by cli::usage_cmd (Task 4) and services::tasks' H3 transcript check (T-0016), through
+// cli::task_cmd -- both need the same env resolution and the same "must already exist" rule.
+pub fn projects_dir(env: &HashMap<String, String>) -> Result<PathBuf, String> {
+    let dir = match env.get("RATCHET_CLAUDE_PROJECTS").filter(|s| !s.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".claude")
+            .join("projects"),
+    };
+    if !dir.is_dir() {
+        return Err(format!("no such projects directory: {}", dir.display()));
+    }
+    Ok(dir)
+}
+
+/// Outcome of confining one transcript/subagent path to the canonicalized projects dir, checked
+/// right before that path is ever read (Blocking finding 1, T-0007: a session id of
+/// `../../outside-secret` used to walk `ratchet usage --by session` two directories above the
+/// projects dir and fold its tokens in).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Confinement {
+    /// Nothing at all is on disk at this path — the ordinary "this session/agent never wrote
+    /// here" case (Requirement 1's "no transcript" row), not a refusal.
+    Missing,
+    /// Something is on disk here, but either it is not the confinement's own file/directory type
+    /// (a symlink planted at the path itself, `symlink_metadata`'s own type, is refused
+    /// unconditionally, wherever it points) or its parent does not canonicalize to somewhere
+    /// inside the projects dir (including a canonicalize failure). Never read.
+    Refused,
+    /// Confirmed present, of the expected type, and confined. Safe to read.
+    Present,
+}
+
+/// Two independent layers against a crafted or planted path, mirroring
+/// `hooks::dispatch::subagent_meta`'s own two-layer defense: `session_id` (and, via the
+/// filenames built under it, `agent_id`) is already run through `hooks::dispatch::sanitize_id`
+/// before `path` is ever built (`transcript_path`/`subagents_dir`), which keeps a crafted id from
+/// introducing a `..` segment or an absolute path of its own; this function is the second,
+/// independent layer, checked right before the read. `symlink_metadata` (which does NOT follow a
+/// symlink) on `path` itself must show the expected type -- `want_dir` for the subagents
+/// directory, a plain file for everything else -- so a symlink planted at a transcript's own path
+/// is refused wherever it points, never followed; and `path`'s parent must canonicalize to
+/// somewhere inside `projects_canon` (a canonicalize failure, including a parent that does not
+/// exist, refuses the path -- it never falls back to reading the raw one).
+// Consumed by cli::usage_cmd (Task 4/T-0007) and, for T-0016's H3 review-transcript check, by
+// cli::task_cmd through `read_identity_transcript` below -- the one path-confinement rule shared
+// by every reader of a Claude Code transcript.
+pub fn confine(path: &Path, projects_canon: &Path, want_dir: bool) -> Confinement {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return Confinement::Missing,
+    };
+    let kind_ok = if want_dir {
+        meta.file_type().is_dir()
+    } else {
+        meta.file_type().is_file()
+    };
+    if !kind_ok {
+        return Confinement::Refused;
+    }
+    let Some(parent) = path.parent() else {
+        return Confinement::Refused;
+    };
+    match parent.canonicalize() {
+        Ok(canon) if canon.starts_with(projects_canon) => Confinement::Present,
+        _ => Confinement::Refused,
+    }
+}
 
 /// The four token classes plus thinking, all defaulting to zero for a record that lacks them.
 // Consumed by usage::attribute (Task 3) and cli::usage_cmd (Task 4).
@@ -238,6 +311,80 @@ pub fn subagents_dir(projects_dir: &Path, cwd: &str, session_id: &str) -> PathBu
         .join("subagents")
 }
 
+/// The transcript path for one identity (T-0016): the session's own transcript for a bare
+/// identity, or that subagent's `agent-<id>.jsonl` for a paired one.
+// Consumed by cli::task_cmd's H3 review-transcript check.
+pub fn identity_transcript_path(
+    projects_dir: &Path,
+    cwd: &str,
+    session_id: &str,
+    agent_id: Option<&str>,
+) -> PathBuf {
+    match agent_id {
+        None => transcript_path(projects_dir, cwd, session_id),
+        Some(a) => subagents_dir(projects_dir, cwd, session_id)
+            .join(format!("agent-{}.jsonl", sanitize_id(a))),
+    }
+}
+
+/// Reads one identity's transcript, confined to `projects_canon` exactly as `ratchet usage`
+/// confines every transcript it reads (T-0007's fix: never trust a path built from a hook-
+/// supplied identifier without checking it stayed inside the projects dir). `None` for anything
+/// not confirmed present, of the right type, and confined — never a partial or refused read.
+// Consumed by cli::task_cmd's H3 review-transcript check (T-0016).
+pub fn read_identity_transcript(
+    projects_dir: &Path,
+    projects_canon: &Path,
+    cwd: &str,
+    session_id: &str,
+    agent_id: Option<&str>,
+) -> Option<Vec<u8>> {
+    let path = identity_transcript_path(projects_dir, cwd, session_id, agent_id);
+    match confine(&path, projects_canon, false) {
+        Confinement::Present => std::fs::read(&path).ok(),
+        Confinement::Missing | Confinement::Refused => None,
+    }
+}
+
+/// Whether any `Bash` `tool_use` block among this transcript's assistant records carries a
+/// command containing `needle` (T-0016's H3: does this identity's transcript actually run the
+/// review it claims to have made). `parse`/`Call` above do not keep a tool's `input` — nothing
+/// before this needed the command text itself — so this reads `content` directly instead of
+/// going through `parse`.
+// Consumed by cli::task_cmd's H3 review-transcript check.
+pub fn contains_bash_command(bytes: &[u8], needle: &str) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(content) = v.pointer("/message/content").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in content {
+            if item.get("type").and_then(Value::as_str) != Some("tool_use") {
+                continue;
+            }
+            if item.get("name").and_then(Value::as_str) != Some("Bash") {
+                continue;
+            }
+            if let Some(cmd) = item.pointer("/input/command").and_then(Value::as_str) {
+                if cmd.contains(needle) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// The sibling `agent-<id>.meta.json` of a subagent transcript.
 // Consumed by usage::attribute (Task 3) and cli::usage_cmd (Task 4).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -405,6 +552,54 @@ mod tests {
             Some("1.10.0"),
             "lexicographic compare would wrongly pick 1.9.0"
         );
+    }
+
+    #[test]
+    fn identity_transcript_path_picks_the_main_or_the_subagent_file() {
+        let root = Path::new("/home/e/.claude/projects");
+        assert_eq!(
+            identity_transcript_path(root, "/repo", "s-1", None),
+            root.join("-repo").join("s-1.jsonl")
+        );
+        assert_eq!(
+            identity_transcript_path(root, "/repo", "s-1", Some("agent-1")),
+            root.join("-repo")
+                .join("s-1")
+                .join("subagents")
+                .join("agent-agent-1.jsonl")
+        );
+    }
+
+    #[test]
+    fn read_identity_transcript_is_none_for_anything_not_confined_and_present() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let projects = dir.path().join("projects");
+        std::fs::create_dir_all(projects.join("-repo")).unwrap();
+        std::fs::write(projects.join("-repo").join("s-1.jsonl"), "{}").unwrap();
+        let canon = projects.canonicalize().unwrap();
+        assert!(read_identity_transcript(&projects, &canon, "/repo", "s-1", None).is_some());
+        assert!(read_identity_transcript(&projects, &canon, "/repo", "s-ghost", None).is_none());
+    }
+
+    #[test]
+    fn contains_bash_command_finds_a_matching_tool_use_and_ignores_others() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ratchet task review T-0016 approve \"ok\""}}]}}"#;
+        assert!(contains_bash_command(line.as_bytes(), "task review T-0016"));
+        assert!(!contains_bash_command(
+            line.as_bytes(),
+            "task review T-9999"
+        ));
+        let other_tool = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"command":"task review T-0016"}}]}}"#;
+        assert!(!contains_bash_command(
+            other_tool.as_bytes(),
+            "task review T-0016"
+        ));
+        let non_assistant = r#"{"type":"user","message":{"content":"task review T-0016"}}"#;
+        assert!(!contains_bash_command(
+            non_assistant.as_bytes(),
+            "task review T-0016"
+        ));
+        assert!(!contains_bash_command(b"not json", "anything"));
     }
 
     #[test]

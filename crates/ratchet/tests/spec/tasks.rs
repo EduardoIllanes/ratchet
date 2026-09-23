@@ -2,7 +2,10 @@
 //! the real binary as a subprocess; they read and seed the database directly because they stand
 //! outside the binary, which production code never does outside `services/`.
 
+use crate::sessions::board_write_call;
 use crate::support::*;
+use serde_json::json;
+use std::io::Write;
 
 // --- Requirement: Readable, stable identifier -----------------------------------------------
 
@@ -512,6 +515,69 @@ fn tasks__verdict_recorded() {
     assert_eq!(task_state(&sb, &id).0, "backlog");
 }
 
+#[test]
+fn tasks__an_unregistered_verdict_is_still_recorded_and_listed() {
+    let sb = board("s-30");
+    let id = new_task(&sb, "ghost reviewed", &[], "s-30", 1);
+    // s-ghost-reviewer is never registered (no join()) -- recording is unconditional on
+    // registration, only the done gate cares.
+    let out = task(
+        &sb,
+        &[
+            "review",
+            &id,
+            "approve",
+            "looks fine to a stranger",
+            "--session",
+            "s-ghost-reviewer",
+        ],
+        "s-30",
+        2,
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let payloads = payloads_of(&sb, &id, "review.verdict");
+    assert_eq!(payloads.len(), 1);
+    assert!(payloads[0].contains("approve"), "{payloads:?}");
+    let shown = stdout(&task(&sb, &["show", &id], "s-30", 3));
+    assert!(shown.contains("looks fine to a stranger"), "{shown}");
+}
+
+#[test]
+fn tasks__task_show_shows_the_agent_on_an_attributed_event() {
+    let sb = board("s-44");
+    let id = new_task(&sb, "attributed verdict", &[], "s-44", 1);
+    let root = sb.root();
+    let agent_id = "rev-3a1b2c3d";
+    let call = board_write_call(
+        &format!("ratchet task review {id} approve \"looks right\""),
+        &root,
+        "tu-r5",
+        Some((agent_id, "ratchet:reviewer")),
+    );
+    assert_eq!(
+        code(&hook_env(
+            &sb,
+            "pre-tool",
+            &call,
+            &root,
+            &[("RATCHET_SESSION_ID", "s-44"), ("RATCHET_NOW", &at(2))]
+        )),
+        0
+    );
+    assert_eq!(
+        code(&task(
+            &sb,
+            &["review", &id, "approve", "looks right"],
+            "s-44",
+            3
+        )),
+        0
+    );
+    let shown = stdout(&task(&sb, &["show", &id], "s-44", 4));
+    assert!(shown.contains("ratchet:reviewer"), "{shown}");
+    assert!(shown.contains(&agent_id[..8]), "{shown}");
+}
+
 // --- Requirement: Done requires an independent review ---------------------------------------
 
 #[test]
@@ -557,8 +623,11 @@ fn tasks__done_refused_when_the_approve_came_from_the_holding_session() {
 #[test]
 fn tasks__done_refused_when_the_approve_came_from_a_session_that_checked_off_an_item() {
     let sb = board("s-29");
-    let id = new_task(&sb, "history disqualifies", &["only criterion"], "s-29", 1);
-    assert_eq!(code(&task(&sb, &["claim", &id], "s-29", 2)), 0);
+    // s-prior is registered (join()) so this pins the "worked on it" refusal specifically, not
+    // the separate "not registered" refusal added for T-0016.
+    assert_eq!(code(&join(&sb, "s-prior", 1)), 0);
+    let id = new_task(&sb, "history disqualifies", &["only criterion"], "s-29", 2);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-29", 3)), 0);
     // s-prior never holds the task, but it recorded the checklist.done earlier (e.g. before a
     // transfer) — close enough to the work to disqualify it as an independent reviewer.
     assert_eq!(
@@ -566,7 +635,7 @@ fn tasks__done_refused_when_the_approve_came_from_a_session_that_checked_off_an_
             &sb,
             &["check", &id, "1", "--session", "s-prior"],
             "s-29",
-            3
+            4
         )),
         0
     );
@@ -575,11 +644,11 @@ fn tasks__done_refused_when_the_approve_came_from_a_session_that_checked_off_an_
             &sb,
             &["review", &id, "approve", "fine", "--session", "s-prior"],
             "s-29",
-            4
+            5
         )),
         0
     );
-    let out = task(&sb, &["status", &id, "done"], "s-29", 5);
+    let out = task(&sb, &["status", &id, "done"], "s-29", 6);
     assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
     let err = stderr(&out);
     assert!(err.contains("no independent review"), "{err}");
@@ -591,11 +660,49 @@ fn tasks__done_refused_when_the_approve_came_from_a_session_that_checked_off_an_
 }
 
 #[test]
+fn tasks__done_refused_when_the_approve_came_from_an_unregistered_session() {
+    let sb = board("s-31");
+    let id = new_task(&sb, "ghost approved", &["only criterion"], "s-31", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-31", 2)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-31", 3)), 0);
+    // s-ghost is never registered (no join()) — a hand-typed --session can still record a
+    // verdict, but it must not satisfy the done gate (T-0016: no minting an arbitrary session
+    // to self-approve).
+    assert_eq!(
+        code(&task(
+            &sb,
+            &[
+                "review",
+                &id,
+                "approve",
+                "looks fine",
+                "--session",
+                "s-ghost"
+            ],
+            "s-31",
+            4
+        )),
+        0
+    );
+    let out = task(&sb, &["status", &id, "done"], "s-31", 5);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.to_lowercase().contains("not registered"), "{err}");
+    assert!(err.to_lowercase().contains("claude code"), "{err}");
+    assert!(err.contains("--unreviewed"), "{err}");
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
+}
+
+#[test]
 fn tasks__done_allowed_after_an_approve_from_another_session() {
     let sb = board("s-25");
-    let id = new_task(&sb, "properly reviewed", &["only criterion"], "s-25", 1);
-    assert_eq!(code(&task(&sb, &["claim", &id], "s-25", 2)), 0);
-    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-25", 3)), 0);
+    // The reviewer session must be one ratchet itself registered (T-0016) — a hand-typed
+    // --session that was never seen by the session-start hook does not satisfy the gate.
+    assert_eq!(code(&join(&sb, "s-reviewer", 1)), 0);
+    let id = new_task(&sb, "properly reviewed", &["only criterion"], "s-25", 2);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-25", 3)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-25", 4)), 0);
+    let review_cmd = format!("ratchet task review {id} approve \"clean diff, gate green\"");
     assert_eq!(
         code(&task(
             &sb,
@@ -608,13 +715,84 @@ fn tasks__done_allowed_after_an_approve_from_another_session() {
                 "s-reviewer"
             ],
             "s-25",
-            4
+            5
         )),
         0
     );
-    let out = task(&sb, &["status", &id, "done"], "s-25", 5);
+    // A bare-session approve needs the same transcript proof (H3) as a paired one — the spec's
+    // own prose already required it for every approving identity (T-0016 review verdict).
+    let root = sb.root();
+    let tb = TranscriptBuilder::new();
+    write_review_call_transcript(&tb, &root, "s-reviewer", None, &at(6), &review_cmd);
+    let projects = tb.root.path().to_string_lossy().to_string();
+    let out = cli(
+        &sb,
+        &["task", "status", &id, "done"],
+        &root,
+        &[
+            ("RATCHET_SESSION_ID", "s-25"),
+            ("RATCHET_NOW", &at(7)),
+            ("RATCHET_CLAUDE_PROJECTS", &projects),
+        ],
+    );
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     assert_eq!(task_state(&sb, &id).0, "done");
+}
+
+#[test]
+fn tasks__done_refused_for_a_registered_bare_session_whose_transcript_lacks_the_review() {
+    let sb = board("s-45");
+    // A bare session hand-registered through the real session-start hook — exactly the shape
+    // T-0016's review flagged: no Agent SDK process, no transcript, ever behind it. With no
+    // agent identity, H3 (require_reviewer_transcript in cli/task_cmd.rs) returns early today
+    // and never checks a bare identity's transcript at all, so this currently reaches `done`
+    // with zero transcript ever written — the assertion below pins the required fix, not the
+    // current behavior.
+    assert_eq!(code(&join(&sb, "s-reviewer2", 1)), 0);
+    let id = new_task(
+        &sb,
+        "bare reviewer with no proof",
+        &["only criterion"],
+        "s-45",
+        2,
+    );
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-45", 3)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-45", 4)), 0);
+    assert_eq!(
+        code(&task(
+            &sb,
+            &[
+                "review",
+                &id,
+                "approve",
+                "looks fine",
+                "--session",
+                "s-reviewer2"
+            ],
+            "s-45",
+            5
+        )),
+        0
+    );
+    // No transcript at all is written for s-reviewer2 -- H3 has nothing to find.
+    let tb = TranscriptBuilder::new();
+    let projects = tb.root.path().to_string_lossy().to_string();
+    let root = sb.root();
+    let out = cli(
+        &sb,
+        &["task", "status", &id, "done"],
+        &root,
+        &[
+            ("RATCHET_SESSION_ID", "s-45"),
+            ("RATCHET_NOW", &at(6)),
+            ("RATCHET_CLAUDE_PROJECTS", &projects),
+        ],
+    );
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.to_lowercase().contains("transcript"), "{err}");
+    assert!(err.contains("task review"), "{err}");
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
 }
 
 #[test]
@@ -681,6 +859,375 @@ fn tasks__unreviewed_succeeds_and_records_the_note() {
             .any(|n| n.contains("done without independent review")),
         "{notes:?}"
     );
+}
+
+/// Slug ratchet uses for a working directory under the Claude "projects" tree — mirrors
+/// `TranscriptBuilder`'s own, private slug (`support.rs`); duplicated here rather than exposed
+/// from there, since a scenario-test file only adds its own tests, never touches shared fixture
+/// code.
+fn projects_slug(cwd: &std::path::Path) -> String {
+    cwd.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Appends one assistant record whose only content is a `Bash` `tool_use` carrying `command` in
+/// `input.command`, to the session's own transcript (`agent_id: None`) or to a subagent's
+/// (`<slug>/<session>/subagents/agent-<id>.jsonl`) — the shape H3 reads (a real Claude Code
+/// transcript's tool_use block carries its `input`; `TranscriptBuilder::call_with_tool` does not,
+/// since no scenario before this one needed the command text itself).
+fn write_review_call_transcript(
+    tb: &TranscriptBuilder,
+    cwd: &std::path::Path,
+    session_id: &str,
+    agent_id: Option<&str>,
+    ts: &str,
+    command: &str,
+) {
+    let slug = projects_slug(cwd);
+    let path = match agent_id {
+        None => tb
+            .root
+            .path()
+            .join(&slug)
+            .join(format!("{session_id}.jsonl")),
+        Some(a) => tb
+            .root
+            .path()
+            .join(&slug)
+            .join(session_id)
+            .join("subagents")
+            .join(format!("agent-{a}.jsonl")),
+    };
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let rec = json!({
+        "type": "assistant",
+        "timestamp": ts,
+        "sessionId": session_id,
+        "cwd": cwd.to_string_lossy(),
+        "gitBranch": "main",
+        "version": "1.2.3",
+        "message": {
+            "model": "claude-sonnet-5",
+            "content": [{
+                "type": "tool_use",
+                "id": "tu-transcript",
+                "name": "Bash",
+                "input": { "command": command },
+            }],
+            "usage": {
+                "input_tokens": 1,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 1,
+            },
+        },
+    });
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(f, "{rec}").unwrap();
+}
+
+#[test]
+fn tasks__done_allowed_for_a_reviewer_subagent_that_never_worked_the_task() {
+    let sb = board("s-40");
+    let id = new_task(
+        &sb,
+        "reviewed by a subagent",
+        &["only criterion"],
+        "s-40",
+        1,
+    );
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-40", 2)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-40", 3)), 0);
+    // A reviewer subagent starts in the holding session -- it never claims or checks anything.
+    seed_subagent_event(
+        &sb,
+        "subagent.start",
+        "s-40",
+        "rev-1",
+        "ratchet:reviewer",
+        "review pass",
+        &id,
+        &at(4),
+    );
+    let root = sb.root();
+    let review_cmd = format!("ratchet task review {id} approve \"looks good\"");
+    let call = board_write_call(
+        &review_cmd,
+        &root,
+        "tu-r1",
+        Some(("rev-1", "ratchet:reviewer")),
+    );
+    assert_eq!(
+        code(&hook_env(
+            &sb,
+            "pre-tool",
+            &call,
+            &root,
+            &[("RATCHET_SESSION_ID", "s-40"), ("RATCHET_NOW", &at(5))]
+        )),
+        0
+    );
+    assert_eq!(
+        code(&task(
+            &sb,
+            &["review", &id, "approve", "looks good"],
+            "s-40",
+            6
+        )),
+        0
+    );
+    let payloads = payloads_of(&sb, &id, "review.verdict");
+    assert!(
+        payloads[0].contains("rev-1"),
+        "verdict not attributed to the subagent: {payloads:?}"
+    );
+
+    let tb = TranscriptBuilder::new();
+    write_review_call_transcript(&tb, &root, "s-40", Some("rev-1"), &at(7), &review_cmd);
+    let projects = tb.root.path().to_string_lossy().to_string();
+
+    let out = cli(
+        &sb,
+        &["task", "status", &id, "done"],
+        &root,
+        &[
+            ("RATCHET_SESSION_ID", "s-40"),
+            ("RATCHET_NOW", &at(8)),
+            ("RATCHET_CLAUDE_PROJECTS", &projects),
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(task_state(&sb, &id).0, "done");
+}
+
+#[test]
+fn tasks__done_refused_for_the_implementer_subagent_that_checked_items() {
+    let sb = board("s-41");
+    let id = new_task(
+        &sb,
+        "self reviewed by its own subagent",
+        &["only criterion"],
+        "s-41",
+        1,
+    );
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-41", 2)), 0);
+    let root = sb.root();
+    // The implementer subagent checks the item -- attributed to (s-41, impl-1).
+    let check_call = board_write_call(
+        &format!("ratchet task check {id} 1"),
+        &root,
+        "tu-c1",
+        Some(("impl-1", "ratchet:implementer")),
+    );
+    assert_eq!(
+        code(&hook_env(
+            &sb,
+            "pre-tool",
+            &check_call,
+            &root,
+            &[("RATCHET_SESSION_ID", "s-41"), ("RATCHET_NOW", &at(3))]
+        )),
+        0
+    );
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-41", 4)), 0);
+    assert!(payloads_of(&sb, &id, "checklist.done")[0].contains("impl-1"));
+
+    // The same subagent identity later "approves" its own work.
+    let review_cmd = format!("ratchet task review {id} approve \"fine\"");
+    let review_call = board_write_call(
+        &review_cmd,
+        &root,
+        "tu-r2",
+        Some(("impl-1", "ratchet:implementer")),
+    );
+    assert_eq!(
+        code(&hook_env(
+            &sb,
+            "pre-tool",
+            &review_call,
+            &root,
+            &[("RATCHET_SESSION_ID", "s-41"), ("RATCHET_NOW", &at(5))]
+        )),
+        0
+    );
+    assert_eq!(
+        code(&task(&sb, &["review", &id, "approve", "fine"], "s-41", 6)),
+        0
+    );
+    assert!(payloads_of(&sb, &id, "review.verdict")[0].contains("impl-1"));
+
+    let tb = TranscriptBuilder::new();
+    write_review_call_transcript(&tb, &root, "s-41", Some("impl-1"), &at(7), &review_cmd);
+    let projects = tb.root.path().to_string_lossy().to_string();
+
+    let out = cli(
+        &sb,
+        &["task", "status", &id, "done"],
+        &root,
+        &[
+            ("RATCHET_SESSION_ID", "s-41"),
+            ("RATCHET_NOW", &at(8)),
+            ("RATCHET_CLAUDE_PROJECTS", &projects),
+        ],
+    );
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("no independent review"), "{err}");
+    assert!(
+        err.contains("impl-1"),
+        "must name the disqualified agent: {err}"
+    );
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
+}
+
+#[test]
+fn tasks__done_refused_for_the_orchestrator_bare_session_that_claimed() {
+    let sb = board("s-42");
+    let id = new_task(
+        &sb,
+        "orchestrator did everything itself",
+        &["only criterion"],
+        "s-42",
+        1,
+    );
+    let root = sb.root();
+    // The claim itself runs from the main thread: its own pre-tool call carries no agent identity.
+    let claim_call = board_write_call(&format!("ratchet task claim {id}"), &root, "tu-c2", None);
+    assert_eq!(
+        code(&hook_env(
+            &sb,
+            "pre-tool",
+            &claim_call,
+            &root,
+            &[("RATCHET_SESSION_ID", "s-42"), ("RATCHET_NOW", &at(2))]
+        )),
+        0
+    );
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-42", 3)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-42", 4)), 0);
+
+    // The orchestrator itself later tries to approve its own task, again from the main thread.
+    let review_call = board_write_call(
+        &format!("ratchet task review {id} approve \"self-approved\""),
+        &root,
+        "tu-r3",
+        None,
+    );
+    assert_eq!(
+        code(&hook_env(
+            &sb,
+            "pre-tool",
+            &review_call,
+            &root,
+            &[("RATCHET_SESSION_ID", "s-42"), ("RATCHET_NOW", &at(5))]
+        )),
+        0
+    );
+    assert_eq!(
+        code(&task(
+            &sb,
+            &["review", &id, "approve", "self-approved"],
+            "s-42",
+            6
+        )),
+        0
+    );
+    assert!(!payloads_of(&sb, &id, "review.verdict")[0].contains("agent_id"));
+
+    let tb = TranscriptBuilder::new();
+    let projects = tb.root.path().to_string_lossy().to_string();
+    let out = cli(
+        &sb,
+        &["task", "status", &id, "done"],
+        &root,
+        &[
+            ("RATCHET_SESSION_ID", "s-42"),
+            ("RATCHET_NOW", &at(7)),
+            ("RATCHET_CLAUDE_PROJECTS", &projects),
+        ],
+    );
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("no independent review"), "{err}");
+    assert!(err.contains("s-42"), "{err}");
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
+}
+
+#[test]
+fn tasks__done_refused_when_the_reviewer_identity_has_no_transcript_containing_the_review_command()
+{
+    let sb = board("s-43");
+    let id = new_task(
+        &sb,
+        "reviewer with no proof",
+        &["only criterion"],
+        "s-43",
+        1,
+    );
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-43", 2)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-43", 3)), 0);
+    seed_subagent_event(
+        &sb,
+        "subagent.start",
+        "s-43",
+        "rev-2",
+        "ratchet:reviewer",
+        "review pass",
+        &id,
+        &at(4),
+    );
+    let root = sb.root();
+    let call = board_write_call(
+        &format!("ratchet task review {id} approve \"looks fine\""),
+        &root,
+        "tu-r4",
+        Some(("rev-2", "ratchet:reviewer")),
+    );
+    assert_eq!(
+        code(&hook_env(
+            &sb,
+            "pre-tool",
+            &call,
+            &root,
+            &[("RATCHET_SESSION_ID", "s-43"), ("RATCHET_NOW", &at(5))]
+        )),
+        0
+    );
+    assert_eq!(
+        code(&task(
+            &sb,
+            &["review", &id, "approve", "looks fine"],
+            "s-43",
+            6
+        )),
+        0
+    );
+    assert!(payloads_of(&sb, &id, "review.verdict")[0].contains("rev-2"));
+
+    // No transcript at all is written for rev-2 -- H3 has nothing to find.
+    let tb = TranscriptBuilder::new();
+    let projects = tb.root.path().to_string_lossy().to_string();
+    let out = cli(
+        &sb,
+        &["task", "status", &id, "done"],
+        &root,
+        &[
+            ("RATCHET_SESSION_ID", "s-43"),
+            ("RATCHET_NOW", &at(7)),
+            ("RATCHET_CLAUDE_PROJECTS", &projects),
+        ],
+    );
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.to_lowercase().contains("transcript"), "{err}");
+    assert!(err.contains("task review"), "{err}");
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
 }
 
 // --- Requirement: Archiving hides, it never deletes -----------------------------------------

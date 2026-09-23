@@ -29,10 +29,19 @@ fn sessions__migrations_apply_once() {
         "got: {}",
         stdout(&first)
     );
+    // Derive the reached version from the first run's own output instead of hardcoding the
+    // latest migration number, so adding a migration doesn't make this scenario stale.
+    let first_out = stdout(&first);
+    let reached_version = first_out
+        .lines()
+        .find_map(|l| l.strip_prefix("now at version "))
+        .unwrap_or_else(|| panic!("no \"now at version\" line: {first_out}"));
+
     let second = cli(&sb, &["db", "migrate"], &sb.root(), &[]);
     assert_eq!(code(&second), 0);
-    assert!(
-        stdout(&second).contains("already at version 1"),
+    assert_eq!(
+        stdout(&second).trim(),
+        format!("already at version {reached_version}"),
         "got: {}",
         stdout(&second)
     );
@@ -529,6 +538,231 @@ fn sessions__a_hook_of_an_unregistered_session_registers_it() {
         1
     );
     assert_eq!(last_seen(&sb, "s-13b"), at(2));
+}
+
+// --- A subagent's board write is attributed to it -------------------------------------------
+
+/// A PreToolUse-shaped `Bash` payload for a board write: `tool_input.command` is the write's
+/// full command text, `tool_use_id` is the call's own identifier (the join key pre-tool and
+/// post-tool share), and `agent` carries `(agent_id, agent_type)` for a subagent's call or is
+/// `None` for the main thread's own call. `pub(crate)` so `tasks.rs` can drive the same
+/// mechanism for the done-gate scenarios without duplicating it.
+pub(crate) fn board_write_call(
+    command: &str,
+    cwd: &std::path::Path,
+    tool_use_id: &str,
+    agent: Option<(&str, &str)>,
+) -> serde_json::Value {
+    let mut payload = json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+        "cwd": cwd.to_string_lossy(),
+        "tool_use_id": tool_use_id,
+    });
+    if let Some((agent_id, agent_type)) = agent {
+        payload["agent_id"] = json!(agent_id);
+        payload["agent_type"] = json!(agent_type);
+    }
+    payload
+}
+
+#[test]
+fn sessions__a_board_write_inside_a_single_matching_subagent_call_is_attributed_to_it() {
+    let session = "s-attr-1";
+    let sb = board(session);
+    let id = new_task(
+        &sb,
+        "attributed to its subagent",
+        &["only criterion"],
+        session,
+        1,
+    );
+    assert_eq!(code(&task(&sb, &["claim", &id], session, 2)), 0);
+    let root = sb.root();
+    let agent_id = "a1b2c3d4e5f6";
+    let call = board_write_call(
+        &format!("ratchet task check {id} 1"),
+        &root,
+        "tu-1",
+        Some((agent_id, "ratchet:implementer")),
+    );
+    let pre = hook_env(
+        &sb,
+        "pre-tool",
+        &call,
+        &root,
+        &[("RATCHET_SESSION_ID", session), ("RATCHET_NOW", &at(3))],
+    );
+    assert_eq!(code(&pre), 0, "pre-tool stderr: {}", stderr(&pre));
+    let out = task(&sb, &["check", &id, "1"], session, 4);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let payloads = payloads_of(&sb, &id, "checklist.done");
+    assert_eq!(payloads.len(), 1);
+    assert!(
+        payloads[0].contains(agent_id),
+        "not attributed to the subagent: {payloads:?}"
+    );
+    assert!(payloads[0].contains("ratchet:implementer"), "{payloads:?}");
+}
+
+#[test]
+fn sessions__a_main_thread_call_stays_attributed_to_the_bare_session() {
+    let session = "s-attr-2";
+    let sb = board(session);
+    let id = new_task(&sb, "main thread write", &["only criterion"], session, 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], session, 2)), 0);
+    let root = sb.root();
+    let call = board_write_call(&format!("ratchet task check {id} 1"), &root, "tu-2", None);
+    let pre = hook_env(
+        &sb,
+        "pre-tool",
+        &call,
+        &root,
+        &[("RATCHET_SESSION_ID", session), ("RATCHET_NOW", &at(3))],
+    );
+    assert_eq!(code(&pre), 0, "pre-tool stderr: {}", stderr(&pre));
+    let out = task(&sb, &["check", &id, "1"], session, 4);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let payloads = payloads_of(&sb, &id, "checklist.done");
+    assert_eq!(payloads.len(), 1);
+    assert!(
+        !payloads[0].contains("agent_id"),
+        "wrongly attributed to an agent: {payloads:?}"
+    );
+}
+
+#[test]
+fn sessions__two_open_matching_calls_stay_attributed_to_the_bare_session() {
+    let session = "s-attr-3";
+    let sb = board(session);
+    let id = new_task(&sb, "ambiguous write", &["only criterion"], session, 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], session, 2)), 0);
+    let root = sb.root();
+    let call_a = board_write_call(
+        &format!("ratchet task check {id} 1"),
+        &root,
+        "tu-3a",
+        Some(("agent-aaa111", "ratchet:implementer")),
+    );
+    let call_b = board_write_call(
+        &format!("ratchet task check {id} 1"),
+        &root,
+        "tu-3b",
+        Some(("agent-bbb222", "ratchet:reviewer")),
+    );
+    assert_eq!(
+        code(&hook_env(
+            &sb,
+            "pre-tool",
+            &call_a,
+            &root,
+            &[("RATCHET_SESSION_ID", session), ("RATCHET_NOW", &at(3))]
+        )),
+        0
+    );
+    assert_eq!(
+        code(&hook_env(
+            &sb,
+            "pre-tool",
+            &call_b,
+            &root,
+            &[("RATCHET_SESSION_ID", session), ("RATCHET_NOW", &at(4))]
+        )),
+        0
+    );
+    let out = task(&sb, &["check", &id, "1"], session, 5);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let payloads = payloads_of(&sb, &id, "checklist.done");
+    assert_eq!(payloads.len(), 1);
+    assert!(
+        !payloads[0].contains("agent_id"),
+        "ambiguous match wrongly attributed: {payloads:?}"
+    );
+}
+
+#[test]
+fn sessions__a_post_tool_call_clears_its_pending_call() {
+    let session = "s-attr-4";
+    let sb = board(session);
+    let id = new_task(
+        &sb,
+        "cleared before the write",
+        &["only criterion"],
+        session,
+        1,
+    );
+    assert_eq!(code(&task(&sb, &["claim", &id], session, 2)), 0);
+    let root = sb.root();
+    let call = board_write_call(
+        &format!("ratchet task check {id} 1"),
+        &root,
+        "tu-4",
+        Some(("agent-ccc333", "ratchet:implementer")),
+    );
+    assert_eq!(
+        code(&hook_env(
+            &sb,
+            "pre-tool",
+            &call,
+            &root,
+            &[("RATCHET_SESSION_ID", session), ("RATCHET_NOW", &at(3))]
+        )),
+        0
+    );
+    assert_eq!(
+        code(&hook_env(
+            &sb,
+            "post-tool",
+            &post_tool(&call),
+            &root,
+            &[("RATCHET_SESSION_ID", session), ("RATCHET_NOW", &at(4))]
+        )),
+        0
+    );
+    let out = task(&sb, &["check", &id, "1"], session, 5);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let payloads = payloads_of(&sb, &id, "checklist.done");
+    assert_eq!(payloads.len(), 1);
+    assert!(
+        !payloads[0].contains("agent-ccc333"),
+        "stale pending call still credited: {payloads:?}"
+    );
+}
+
+#[test]
+fn sessions__a_session_identifier_cannot_express_an_agent_identity() {
+    let sb = board("s-attr-5");
+    let id = new_task(&sb, "no forged pair", &[], "s-attr-5", 1);
+    let root = sb.root();
+
+    let via_flag = task(
+        &sb,
+        &["claim", &id, "--session", "s-attr-5/agent-x"],
+        "s-attr-5",
+        2,
+    );
+    assert_eq!(code(&via_flag), 1, "stdout: {}", stdout(&via_flag));
+    let flag_err = stderr(&via_flag).to_lowercase();
+    assert!(flag_err.contains("cannot contain"), "{flag_err}");
+    // Pins that this is its own, dedicated refusal -- not merely today's "is not registered"
+    // message happening to echo a value that contains a slash.
+    assert!(!flag_err.contains("is not registered"), "{flag_err}");
+    assert_eq!(task_state(&sb, &id).1, None, "flag form wrote a claim");
+
+    let via_env = cli(
+        &sb,
+        &["task", "claim", &id],
+        &root,
+        &[
+            ("RATCHET_SESSION_ID", "s-attr-5/agent-x"),
+            ("RATCHET_NOW", &at(3)),
+        ],
+    );
+    assert_eq!(code(&via_env), 1, "stdout: {}", stdout(&via_env));
+    let env_err = stderr(&via_env).to_lowercase();
+    assert!(env_err.contains("cannot contain"), "{env_err}");
+    assert!(!env_err.contains("is not registered"), "{env_err}");
+    assert_eq!(task_state(&sb, &id).1, None, "env form wrote a claim");
 }
 
 // --- Derived session state ------------------------------------------------------------------

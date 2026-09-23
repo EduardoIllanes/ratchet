@@ -136,6 +136,9 @@ pub struct Event {
     pub id: i64,
     pub ts: DateTime<Utc>,
     pub session_id: Option<String>,
+    /// The subagent this event is attributed to, alongside `session_id` — `None` for the bare
+    /// session, exactly as every event before T-0016's pairing existed (migration 0002).
+    pub agent_id: Option<String>,
     pub task_id: Option<String>,
     pub kind: String,
     pub payload: Value,
@@ -153,6 +156,7 @@ impl Event {
             id: row.get("id")?,
             ts: clock::parse(&ts).unwrap_or(epoch),
             session_id: row.get("session_id")?,
+            agent_id: row.get("agent_id")?,
             task_id: row.get("task_id")?,
             kind: row.get("kind")?,
             payload: serde_json::from_str(&payload).unwrap_or(Value::Null),

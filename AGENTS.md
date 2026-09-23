@@ -59,12 +59,20 @@ self-reviewed, placeholder-shipping, branch-left-red change (T-0006, 2026-09-22)
       **target branch, after merging your work into it** — not only inside your worktree. A
       worktree can be green while the branch it merges into is red.
 - [ ] **The review is never your own note.** `ratchet task note` from the session that did the
-      work is not a review. An independent reviewer — a different session, its own
-      `--session` — records the verdict: `ratchet task review <id> approve "…"` or
-      `ratchet task review <id> changes "…"`.
-- [ ] **Before `status <id> done`**: an `approve` verdict from that independent session must
-      already exist. The CLI refuses `done` on its own when it is missing, naming what to run —
-      the check here is so you never find that out from a refusal mid-close.
+      work is not a review. An independent reviewer records the verdict — `ratchet task review
+      <id> approve "…"` or `ratchet task review <id> changes "…"` — and it must come from one of
+      two identities ratchet itself can verify, never a hand-typed `--session`: a different
+      session the session-start hook actually registered, or a reviewer subagent dispatched
+      inside the holding session (its `Bash` call running the `review` is what a pre-tool hook
+      records, matched by task id and verdict word against that session's own open calls — no
+      `--session` involved). A verdict from an identity ratchet never saw is still recorded, but
+      it will not satisfy the done gate below — otherwise a session could mint an arbitrary
+      `--session`, or a crafted command, and approve its own work.
+- [ ] **Before `status <id> done`**: an `approve` verdict from that independent identity must
+      already exist, and — for a reviewer subagent — its own Claude Code transcript must actually
+      contain the `ratchet task review <id> …` call it claims to have made (not merely a matching
+      command string). The CLI refuses `done` on its own when any of this is missing, naming what
+      to run — the check here is so you never find that out from a refusal mid-close.
 - [ ] **Nothing named `scratch`, `probe`, or `placeholder` is committed.** A probe lives in the
       job's temp directory or the session scratchpad, never in the repo, never in a commit.
 - [ ] **End**: `ratchet task handoff <id> "…" --status review` — what is left, where the work is,

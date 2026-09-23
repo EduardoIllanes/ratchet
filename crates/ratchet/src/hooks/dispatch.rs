@@ -21,6 +21,7 @@ use crate::guardrails::rules::load_rule_set;
 use crate::model::{EventKind, LaunchedBy, Session, SessionMode, Source};
 use crate::repo::{find_repo, git_branch, has_venv, normalize, status_paths, within, Repo};
 use crate::services::events;
+use crate::services::pending_calls;
 use crate::services::sessions::{self, StartInput};
 use crate::services::{tasks, ServiceError};
 
@@ -50,6 +51,9 @@ pub struct Payload {
     pub description: Option<String>,
     pub transcript_path: Option<String>,
     pub exit_status: Option<Value>,
+    /// The tool call's own identifier (T-0016): the join key a pre-tool pending-call row and its
+    /// post-tool cleanup share.
+    pub tool_use_id: Option<String>,
 }
 
 pub fn parse_payload(text: &str) -> Result<Payload, String> {
@@ -120,11 +124,47 @@ pub fn pre_tool(
             if is_command_tool(&payload.tool_name) {
                 if let Some(session_id) = session_identity(&payload, env) {
                     record_snapshot(home, &session_id, &repo.main_root);
+                    record_pending_call(home, &payload, &session_id, env);
                 }
             }
             Ok(0)
         }
     }
+}
+
+/// T-0016: records a pending call for every allowed `Bash`/`PowerShell` call, so a later board
+/// write in this same session can attribute itself to the subagent that ran it (`pending_calls::
+/// resolve`). Best-effort like `record_snapshot` above: a database that is not ready yet (no
+/// `session-start` has run) or any other write failure never blocks the session, it just means
+/// this call attributes nowhere and stays the bare session, exactly as before this requirement
+/// existed. Nothing is recorded without the harness's own `tool_use_id` — with no join key, a
+/// post-tool could never clear the row, and it would sit until the TTL sweep for nothing.
+fn record_pending_call(
+    home: &Path,
+    payload: &Payload,
+    session_id: &str,
+    env: &HashMap<String, String>,
+) {
+    let Some(tool_use_id) = payload.tool_use_id.as_deref() else {
+        return;
+    };
+    let Ok(conn) = db::open_ready(home) else {
+        return;
+    };
+    let command = payload
+        .tool_input
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let _ = pending_calls::record(
+        &conn,
+        tool_use_id,
+        session_id,
+        payload.agent_id.as_deref(),
+        payload.agent_type.as_deref(),
+        command,
+        clock::now(env),
+    );
 }
 
 fn is_command_tool(tool_name: &str) -> bool {
@@ -201,6 +241,15 @@ fn post_tool(
     let Some(session_id) = session_identity(payload, env) else {
         return Ok(0);
     };
+    // T-0016: clears this call's pending row (if any) before anything else below, which may
+    // return early for reasons that have nothing to do with attribution (no snapshot, no
+    // main-tree change). Best-effort, like every other write this hook makes on a database that
+    // may not exist yet.
+    if let Some(tool_use_id) = payload.tool_use_id.as_deref() {
+        if let Ok(conn) = db::open_ready(home) {
+            let _ = pending_calls::clear(&conn, tool_use_id);
+        }
+    }
     let Some(before) = take_snapshot(home, &session_id) else {
         return Ok(0);
     };
@@ -532,6 +581,15 @@ fn subagent_event(
         now,
     )
     .map_err(|e| e.to_string())?;
+    // T-0016: a subagent that has stopped can no longer have an open Bash call of its own; sweep
+    // whatever it left pending rather than wait for the TTL, so no later write in this session can
+    // still find it (it never should — an ended subagent's calls are gone — but this closes the
+    // window instead of relying on it never mattering).
+    if kind == EventKind::SubagentStop {
+        if let Some(agent_id) = payload.agent_id.as_deref() {
+            let _ = pending_calls::clear_for_agent(&b.conn, &b.session.id, agent_id);
+        }
+    }
     Ok(0)
 }
 
@@ -612,6 +670,9 @@ fn session_end(
         return Ok(0);
     }
     let session = sessions::end(&mut conn, &session_id, now).map_err(|e| e.to_string())?;
+    // T-0016: whatever this session left pending can never be matched again — sweep it now
+    // instead of waiting for the TTL, the same "tidy close" reasoning as `release_dead` below.
+    let _ = pending_calls::clear_for_session(&conn, &session_id);
     // Tidy close: this session is `ended`, so its work goes back now instead of waiting for the
     // lazy sweep of the next session start.
     tasks::release_dead(
