@@ -90,11 +90,53 @@ struct Pending {
     command: String,
 }
 
+/// Whether `command` contains `task_id` as a whole token — not merely as a substring inside a
+/// longer identifier. `T-1000` must not match a command that only mentions `T-10000` (fix round,
+/// T-0016): a plain `.contains` let a shorter id falsely resolve against a call actually naming a
+/// longer one that happens to start with it. A match counts only when the character immediately
+/// before it (if any) and immediately after it (if any) are not alphanumeric — task ids are
+/// themselves alphanumeric-plus-hyphen, so a hyphen on either side (e.g. inside a longer flag)
+/// still counts as a boundary, only another letter or digit extends the token past `task_id`.
+fn contains_task_token(command: &str, task_id: &str) -> bool {
+    if task_id.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(pos) = command[start..].find(task_id) {
+        let idx = start + pos;
+        let end = idx + task_id.len();
+        let before_ok = command[..idx]
+            .chars()
+            .next_back()
+            .map(|c| !c.is_alphanumeric())
+            .unwrap_or(true);
+        let after_ok = command[end..]
+            .chars()
+            .next()
+            .map(|c| !c.is_alphanumeric())
+            .unwrap_or(true);
+        if before_ok && after_ok {
+            return true;
+        }
+        // Advance by one character (not the whole needle) so an overlapping occurrence starting
+        // one position later is still found.
+        start = idx
+            + command[idx..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(1);
+    }
+    false
+}
+
 /// A board write's identity, resolved from this session's own open pending calls: the ones whose
-/// command text contains `task_id` and `subcommand` — and, for a review, `verdict` too — all as
-/// plain substrings, anywhere in the text. Exactly one such call, carrying an agent identifier,
-/// gives `Some((agent_id, agent_type))`; one with no agent identifier, none at all, or more than
-/// one (ambiguous) give `None` — the bare session, exactly as before this requirement existed. A
+/// command text contains `task_id` as a whole token (`contains_task_token`, not a plain
+/// substring — a fix round, T-0016, closed `T-1000` falsely matching a call that only names
+/// `T-10000`) and `subcommand` — and, for a review, `verdict` too — as plain substrings, anywhere
+/// in the text. Exactly one such call, carrying an agent identifier, gives
+/// `Some((agent_id, agent_type))`; one with no agent identifier, none at all, or more than one
+/// (ambiguous) give `None` — the bare session, exactly as before this requirement existed. A
 /// match is never consumed: the same open call can still attribute more than one board write (a
 /// compound `check && note` runs two `ratchet` processes against the one call still open).
 /// `agent_type` defaults to the empty string when a matching call somehow carries an identifier
@@ -118,7 +160,7 @@ pub fn resolve(
     let mut matches = Vec::new();
     for row in rows {
         let row = row?;
-        if row.command.contains(task_id)
+        if contains_task_token(&row.command, task_id)
             && row.command.contains(subcommand)
             && verdict.map(|v| row.command.contains(v)).unwrap_or(true)
         {
@@ -346,5 +388,47 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM pending_calls", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn a_shorter_task_id_does_not_match_a_call_naming_a_longer_one() {
+        // Fix round, T-0016: a plain substring match let "T-1000" resolve against a call that
+        // only ever names "T-10000" (an unrelated, longer task id that happens to start with the
+        // same four digits). Once ids grow past four digits this must stay a non-match.
+        assert!(!contains_task_token(
+            "ratchet task check T-10000 1",
+            "T-1000"
+        ));
+        // The exact id, and the exact id followed by non-alphanumeric punctuation, still match.
+        assert!(contains_task_token("ratchet task check T-1000 1", "T-1000"));
+        assert!(contains_task_token(
+            "ratchet task review T-1000 approve \"fine\"",
+            "T-1000"
+        ));
+        // A longer id is unaffected by a shorter one appearing as its own prefix elsewhere.
+        assert!(contains_task_token(
+            "ratchet task check T-10000 1 (was T-1000)",
+            "T-10000"
+        ));
+    }
+
+    #[test]
+    fn resolve_does_not_attribute_a_shorter_task_id_to_a_longer_ones_call() {
+        let c = conn();
+        record(
+            &c,
+            "tu-1",
+            "s-1",
+            Some("agent-1"),
+            Some("ratchet:implementer"),
+            "ratchet task check T-10000 1",
+            at("2026-09-16T12:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(resolve(&c, "s-1", "T-1000", "check", None).unwrap(), None);
+        assert_eq!(
+            resolve(&c, "s-1", "T-10000", "check", None).unwrap(),
+            Some(("agent-1".to_string(), "ratchet:implementer".to_string()))
+        );
     }
 }

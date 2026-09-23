@@ -118,26 +118,29 @@ fn done_evidence_ready(f: &Face, task_id: &str, why: Option<&str>) -> bool {
     }
 }
 
-/// T-0016's H3: before a `done` move actually happens, a subagent-paired approving identity's own
-/// Claude Code transcript must contain the review command it claims to have run — otherwise a
-/// forged pending-call match (crafted command text) could approve without ever having reviewed
-/// anything. Checked only for a paired identity: a bare-session approve is already guarded by
-/// session registration (T-0016 step 1, and by every check `qualifying_reviewer` already ran) and
-/// gains nothing from this extra proof, so it stays exactly as it behaved before this existed
-/// (see the review that recorded this decision on T-0016's board).
+/// T-0016's H3: before a `done` move actually happens, the approving identity's own Claude Code
+/// transcript must contain the review command it claims to have run — otherwise a forged
+/// pending-call match (crafted command text), or a hand-registered session with no real Claude
+/// Code process behind it at all, could approve without ever having reviewed anything. Applies to
+/// every approving identity, paired or bare (see the review that flagged the bare-session gap on
+/// T-0016's board): a paired identity's proof lives in that subagent's own `agent-<id>.jsonl`
+/// (`transcript::read_identity_transcript` with `Some(agent_id)`, as before); a bare identity's
+/// proof lives in the session's own `<session>.jsonl` (`None`) — `identity_transcript_path`
+/// already picks the right file for either case, so only the early return that used to skip a
+/// bare identity entirely needed to go.
 ///
 /// Every early exit here is deliberately `Ok(())`, never a refusal of its own: this function only
 /// ever ADDS a refusal on top of what `transition` would already decide: if `reviewer_identity_
-/// for_done` itself errs, or there is no projects dir, or no transcript at all, this falls through
-/// silently and lets `transition`'s own `require_independent_review` raise the authoritative,
-/// better-worded error a moment later. This is a preview, not a second source of truth.
+/// for_done` itself errs, or there is no projects dir, or no session row at all, this falls
+/// through silently and lets `transition`'s own `require_independent_review` raise the
+/// authoritative, better-worded error a moment later. This is a preview, not a second source of
+/// truth. Once an identity is resolved and its session found, though, a missing or non-matching
+/// transcript IS the refusal this function exists to raise — that is the bare-session bypass H3
+/// closes, so it cannot fall through silently the way the exits above do.
 fn require_reviewer_transcript(f: &Face, task_id: &str) -> Result<(), String> {
     let identity = match tasks::reviewer_identity_for_done(&f.conn, task_id) {
         Ok(v) => v,
         Err(_) => return Ok(()),
-    };
-    let Some(agent_id) = identity.agent_id.as_deref() else {
-        return Ok(());
     };
     let session = match sessions::get(&f.conn, &identity.session_id) {
         Ok(Some(s)) => s,
@@ -155,7 +158,7 @@ fn require_reviewer_transcript(f: &Face, task_id: &str) -> Result<(), String> {
         &projects_canon,
         &session.cwd,
         &identity.session_id,
-        Some(agent_id),
+        identity.agent_id.as_deref(),
     )
     .map(|bytes| transcript::contains_bash_command(&bytes, &needle))
     .unwrap_or(false);
