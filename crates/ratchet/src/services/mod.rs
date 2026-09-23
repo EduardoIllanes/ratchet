@@ -2,6 +2,7 @@
 //! never updated or deleted. Faces (`hooks`, `cli`) call in here and translate errors.
 
 pub mod events;
+pub mod pending_calls;
 pub mod sessions;
 pub mod tasks;
 

@@ -14,7 +14,8 @@ use crate::db;
 use crate::model::{Source, TaskStatus};
 use crate::output;
 use crate::repo::{find_repo, normalize};
-use crate::services::{events, sessions, tasks};
+use crate::services::{events, pending_calls, sessions, tasks};
+use crate::usage::transcript;
 
 const VALID_STATUSES: &str = "backlog, ready, in_progress, blocked, review, done";
 const VALID_VERDICTS: &str = "approve, changes";
@@ -62,22 +63,110 @@ fn fail(e: impl std::fmt::Display) -> i32 {
     1
 }
 
-fn session_of(f: &Face, explicit: Option<&str>) -> Option<String> {
-    sessions::resolve(&f.conn, explicit, &f.env, &f.cwd, &f.th, f.now)
-        .ok()
-        .flatten()
+/// `Err` here is never "no session" (that is `Ok(None)`) — it is `sessions::resolve` refusing a
+/// `--session`/`RATCHET_SESSION_ID` value outright (T-0016: one shaped like a pair), and every
+/// caller must surface it as the command's own failure, not silently fall back to no session.
+fn session_of(f: &Face, explicit: Option<&str>) -> Result<Option<String>, String> {
+    sessions::resolve(&f.conn, explicit, &f.env, &f.cwd, &f.th, f.now).map_err(|e| e.to_string())
 }
 
 /// A write nobody can be attributed to still happens — the board would lose the note otherwise —
 /// but it says so once on stderr.
-fn attributed(f: &Face, explicit: Option<&str>) -> Option<String> {
-    let session = session_of(f, explicit);
+fn attributed(f: &Face, explicit: Option<&str>) -> Result<Option<String>, String> {
+    let session = session_of(f, explicit)?;
     if session.is_none() {
         eprintln!(
             "warning: no session resolved (use --session or RATCHET_SESSION_ID); recording with no session"
         );
     }
-    session
+    Ok(session)
+}
+
+/// Resolves the subagent (if any) T-0016's `pending_calls::resolve` attributes this board write
+/// to: `session_id` is what `session_of`/`attributed` already resolved, `subcommand` is the
+/// write's own CLI word (`"claim"`, `"check"`, `"note"`, `"handoff"`, `"review"` or `"status"`),
+/// and `verdict` is `Some` only for a review. `None` with no session at all — there is nothing to
+/// search — or on any database error (never fails the write itself over an attribution lookup).
+fn agent_of(
+    f: &Face,
+    session_id: Option<&str>,
+    task_id: &str,
+    subcommand: &str,
+    verdict: Option<&str>,
+) -> Option<(String, String)> {
+    let session_id = session_id?;
+    pending_calls::resolve(&f.conn, session_id, task_id, subcommand, verdict)
+        .ok()
+        .flatten()
+}
+
+/// Borrows out of `agent_of`'s owned pair, for the `Option<(&str, &str)>` every attributed
+/// service function takes.
+fn agent_ref(agent: &Option<(String, String)>) -> Option<(&str, &str)> {
+    agent.as_ref().map(|(id, ty)| (id.as_str(), ty.as_str()))
+}
+
+/// Whether a task's checklist evidence is already in place for a `done` move — the same test
+/// `require_done_evidence` runs inside `transition`, read-only, so `require_reviewer_transcript`
+/// below only spends effort on H3 when the move has a real chance of otherwise succeeding (an
+/// incomplete checklist should be refused for THAT reason, not an unrelated transcript message).
+fn done_evidence_ready(f: &Face, task_id: &str, why: Option<&str>) -> bool {
+    match tasks::progress(&f.conn, task_id) {
+        Ok(Some((done, total))) => done == total,
+        Ok(None) => why.map(|w| !w.trim().is_empty()).unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// T-0016's H3: before a `done` move actually happens, a subagent-paired approving identity's own
+/// Claude Code transcript must contain the review command it claims to have run — otherwise a
+/// forged pending-call match (crafted command text) could approve without ever having reviewed
+/// anything. Checked only for a paired identity: a bare-session approve is already guarded by
+/// session registration (T-0016 step 1, and by every check `qualifying_reviewer` already ran) and
+/// gains nothing from this extra proof, so it stays exactly as it behaved before this existed
+/// (see the review that recorded this decision on T-0016's board).
+///
+/// Every early exit here is deliberately `Ok(())`, never a refusal of its own: this function only
+/// ever ADDS a refusal on top of what `transition` would already decide: if `reviewer_identity_
+/// for_done` itself errs, or there is no projects dir, or no transcript at all, this falls through
+/// silently and lets `transition`'s own `require_independent_review` raise the authoritative,
+/// better-worded error a moment later. This is a preview, not a second source of truth.
+fn require_reviewer_transcript(f: &Face, task_id: &str) -> Result<(), String> {
+    let identity = match tasks::reviewer_identity_for_done(&f.conn, task_id) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let Some(agent_id) = identity.agent_id.as_deref() else {
+        return Ok(());
+    };
+    let session = match sessions::get(&f.conn, &identity.session_id) {
+        Ok(Some(s)) => s,
+        _ => return Ok(()),
+    };
+    let Ok(projects) = transcript::projects_dir(&f.env) else {
+        return Ok(());
+    };
+    let Ok(projects_canon) = projects.canonicalize() else {
+        return Ok(());
+    };
+    let needle = format!("task review {task_id}");
+    let found = transcript::read_identity_transcript(
+        &projects,
+        &projects_canon,
+        &session.cwd,
+        &identity.session_id,
+        Some(agent_id),
+    )
+    .map(|bytes| transcript::contains_bash_command(&bytes, &needle))
+    .unwrap_or(false);
+    if found {
+        Ok(())
+    } else {
+        Err(format!(
+            "{task_id}: the approving identity's transcript carries no matching review command \
+             — expected a Bash tool call containing `task review {task_id}`"
+        ))
+    }
 }
 
 /// `TaskStatus::from_db` is lenient by design, so a name it does not know comes back as `backlog`.
@@ -125,8 +214,11 @@ pub fn list(
     }
     let claimed = if mine {
         match session_of(&f, session) {
-            Some(id) => Some(id),
-            None => return fail("--mine needs a session (use --session or RATCHET_SESSION_ID)"),
+            Ok(Some(id)) => Some(id),
+            Ok(None) => {
+                return fail("--mine needs a session (use --session or RATCHET_SESSION_ID)")
+            }
+            Err(e) => return fail(e),
         }
     } else {
         None
@@ -260,15 +352,33 @@ pub fn show(env: &HashMap<String, String>, cwd: Option<PathBuf>, id: &str, json_
         lines.push("events:".to_string());
         for ev in &history {
             lines.push(format!(
-                "  {}  {:<16} {}",
+                "  {}  {:<16} {}{}",
                 clock::iso(ev.ts),
                 ev.kind,
-                summary(&ev.payload)
+                summary(&ev.payload),
+                agent_suffix(&ev.agent_id, &ev.payload)
             ));
         }
     }
     output::emit(&f.home, &format!("task-{id}"), &lines, f.now);
     0
+}
+
+/// T-0016: `" · <agent type> <first 8 chars of the agent id>"` on an event attributed to a
+/// subagent, empty for the bare session — exactly what `task show`'s history is asked to add
+/// alongside the session on an attributed event. `agent_type` rides in the payload (`events::
+/// emit_attributed` put it there); a plain first-8-chars, not `short_session`'s "…"-truncated
+/// style, since the spec asks for the identifier's first eight characters specifically.
+fn agent_suffix(agent_id: &Option<String>, payload: &Value) -> String {
+    let Some(agent_id) = agent_id.as_deref() else {
+        return String::new();
+    };
+    let agent_type = payload
+        .get("agent_type")
+        .and_then(Value::as_str)
+        .unwrap_or("agent");
+    let short: String = agent_id.chars().take(8).collect();
+    format!(" · {agent_type} {short}")
 }
 
 /// One short line for an event payload: its text when it has one, else its non-null keys.
@@ -336,7 +446,10 @@ pub fn new(
         (Some(t), None) => t.to_string(),
         (None, None) => String::new(),
     };
-    let session_id = attributed(&f, session);
+    let session_id = match attributed(&f, session) {
+        Ok(v) => v,
+        Err(e) => return fail(e),
+    };
     let created = tasks::create(
         &mut f.conn,
         tasks::NewTask {
@@ -377,10 +490,21 @@ pub fn claim(
         Ok(v) => v,
         Err(e) => return fail(e),
     };
-    let Some(session_id) = session_of(&f, session) else {
-        return fail("claiming needs a session (use --session or RATCHET_SESSION_ID)");
+    let session_id = match session_of(&f, session) {
+        Ok(Some(v)) => v,
+        Ok(None) => return fail("claiming needs a session (use --session or RATCHET_SESSION_ID)"),
+        Err(e) => return fail(e),
     };
-    match tasks::claim(&mut f.conn, id, &session_id, &f.th, Source::Cli, f.now) {
+    let agent = agent_of(&f, Some(&session_id), id, "claim", None);
+    match tasks::claim_attributed(
+        &mut f.conn,
+        id,
+        &session_id,
+        agent_ref(&agent),
+        &f.th,
+        Source::Cli,
+        f.now,
+    ) {
         Err(e) => fail(e),
         Ok(task) => {
             if json_out {
@@ -416,13 +540,23 @@ pub fn status(
         Ok(s) => s,
         Err(e) => return fail(e),
     };
-    let session_id = attributed(&f, session);
-    match tasks::transition(
+    let session_id = match attributed(&f, session) {
+        Ok(v) => v,
+        Err(e) => return fail(e),
+    };
+    if to == TaskStatus::Done && !unreviewed && done_evidence_ready(&f, id, why) {
+        if let Err(e) = require_reviewer_transcript(&f, id) {
+            return fail(e);
+        }
+    }
+    let agent = agent_of(&f, session_id.as_deref(), id, "status", None);
+    match tasks::transition_attributed(
         &mut f.conn,
         id,
         to,
         Source::Cli,
         session_id.as_deref(),
+        agent_ref(&agent),
         why,
         unreviewed,
         f.now,
@@ -455,23 +589,29 @@ pub fn check(
         Ok(v) => v,
         Err(e) => return fail(e),
     };
-    let session_id = attributed(&f, session);
+    let session_id = match attributed(&f, session) {
+        Ok(v) => v,
+        Err(e) => return fail(e),
+    };
+    let agent = agent_of(&f, session_id.as_deref(), id, "check", None);
     let result = if undo {
-        tasks::uncheck_many(
+        tasks::uncheck_many_attributed(
             &mut f.conn,
             id,
             positions,
             Source::Cli,
             session_id.as_deref(),
+            agent_ref(&agent),
             f.now,
         )
     } else {
-        tasks::check_many(
+        tasks::check_many_attributed(
             &mut f.conn,
             id,
             positions,
             Source::Cli,
             session_id.as_deref(),
+            agent_ref(&agent),
             f.now,
         )
     };
@@ -519,14 +659,19 @@ pub fn review(
         Ok(v) => v,
         Err(e) => return fail(e),
     };
-    let session_id = attributed(&f, session);
-    match tasks::review(
+    let session_id = match attributed(&f, session) {
+        Ok(v) => v,
+        Err(e) => return fail(e),
+    };
+    let agent = agent_of(&f, session_id.as_deref(), id, "review", Some(verdict));
+    match tasks::review_attributed(
         &mut f.conn,
         id,
         verdict,
         text,
         Source::Cli,
         session_id.as_deref(),
+        agent_ref(&agent),
         f.now,
     ) {
         Err(e) => fail(e),
@@ -555,13 +700,18 @@ pub fn note(
         Ok(v) => v,
         Err(e) => return fail(e),
     };
-    let session_id = attributed(&f, session);
-    match tasks::note_many(
+    let session_id = match attributed(&f, session) {
+        Ok(v) => v,
+        Err(e) => return fail(e),
+    };
+    let agent = agent_of(&f, session_id.as_deref(), id, "note", None);
+    match tasks::note_many_attributed(
         &mut f.conn,
         id,
         texts,
         Source::Cli,
         session_id.as_deref(),
+        agent_ref(&agent),
         f.now,
     ) {
         Err(e) => fail(e),
@@ -599,13 +749,18 @@ pub fn handoff(
         Ok(v) => v,
         Err(e) => return fail(e),
     };
-    let session_id = attributed(&f, session);
-    let handoff_ev = match tasks::handoff(
+    let session_id = match attributed(&f, session) {
+        Ok(v) => v,
+        Err(e) => return fail(e),
+    };
+    let handoff_agent = agent_of(&f, session_id.as_deref(), id, "handoff", None);
+    let handoff_ev = match tasks::handoff_attributed(
         &mut f.conn,
         id,
         text,
         Source::Cli,
         session_id.as_deref(),
+        agent_ref(&handoff_agent),
         f.now,
     ) {
         Err(e) => return fail(e),
@@ -623,12 +778,19 @@ pub fn handoff(
         Ok(s) => s,
         Err(e) => return fail(e),
     };
-    match tasks::transition(
+    if to == TaskStatus::Done && !unreviewed && done_evidence_ready(&f, id, why) {
+        if let Err(e) = require_reviewer_transcript(&f, id) {
+            return fail(e);
+        }
+    }
+    let status_agent = agent_of(&f, session_id.as_deref(), id, "status", None);
+    match tasks::transition_attributed(
         &mut f.conn,
         id,
         to,
         Source::Cli,
         session_id.as_deref(),
+        agent_ref(&status_agent),
         why,
         unreviewed,
         f.now,
@@ -685,7 +847,10 @@ fn shelve(
         Ok(v) => v,
         Err(e) => return fail(e),
     };
-    let session_id = session_of(&f, session);
+    let session_id = match session_of(&f, session) {
+        Ok(v) => v,
+        Err(e) => return fail(e),
+    };
     let result = if hide {
         tasks::archive(&mut f.conn, id, Source::Cli, session_id.as_deref(), f.now)
     } else {

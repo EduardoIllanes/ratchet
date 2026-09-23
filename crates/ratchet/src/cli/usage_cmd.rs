@@ -21,7 +21,7 @@ use crate::services::{events, sessions, tasks};
 use crate::usage::attribute::{
     self, AttributedCall, SessionEvent, SessionEventKind, SubagentEvent, Totals,
 };
-use crate::usage::transcript::{self, Call, Meta};
+use crate::usage::transcript::{self, confine, projects_dir, Call, Confinement, Meta};
 
 /// One task's identity for a report row, plus what `rounds`/`touched` need: `touched_at` is the
 /// timestamp of its most recent event, any kind (Assumption 2); `first_claim`/`review_entries`
@@ -69,22 +69,6 @@ pub(crate) struct Collected {
 fn fail(e: impl std::fmt::Display) -> i32 {
     eprintln!("error: {e}");
     1
-}
-
-/// `RATCHET_CLAUDE_PROJECTS` when set and non-empty, else `~/.claude/projects`. Checked before
-/// the database is ever opened (R1: a missing directory fails naming the path, exit 1).
-fn projects_dir(env: &HashMap<String, String>) -> Result<PathBuf, String> {
-    let dir = match env.get("RATCHET_CLAUDE_PROJECTS").filter(|s| !s.is_empty()) {
-        Some(p) => PathBuf::from(p),
-        None => dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".claude")
-            .join("projects"),
-    };
-    if !dir.is_dir() {
-        return Err(format!("no such projects directory: {}", dir.display()));
-    }
-    Ok(dir)
 }
 
 fn session_event_of(e: &Event) -> Option<SessionEvent> {
@@ -145,56 +129,6 @@ fn bump_version(current: &mut Option<String>, candidate: &Option<String>) {
     let Some(v) = candidate else { return };
     if transcript::newer(current, v) {
         *current = Some(v.clone());
-    }
-}
-
-/// Outcome of confining one transcript/subagent path to the canonicalized projects dir, checked
-/// right before that path is ever read (Blocking finding 1: a session id of
-/// `../../outside-secret` used to walk `ratchet usage --by session` two directories above the
-/// projects dir and fold its tokens in).
-enum Confinement {
-    /// Nothing at all is on disk at this path — the ordinary "this session/agent never wrote
-    /// here" case (Requirement 1's "no transcript" row), not a refusal.
-    Missing,
-    /// Something is on disk here, but either it is not the confinement's own file/directory type
-    /// (a symlink planted at the path itself, `symlink_metadata`'s own type, is refused
-    /// unconditionally, wherever it points) or its parent does not canonicalize to somewhere
-    /// inside the projects dir (including a canonicalize failure). Never read.
-    Refused,
-    /// Confirmed present, of the expected type, and confined. Safe to read.
-    Present,
-}
-
-/// Two independent layers against a crafted or planted path, mirroring
-/// `hooks::dispatch::subagent_meta`'s own two-layer defense: `session_id` (and, via the
-/// filenames built under it, `agent_id`) is already run through `hooks::dispatch::sanitize_id`
-/// before `path` is ever built (`transcript::transcript_path`/`subagents_dir`), which keeps a
-/// crafted id from introducing a `..` segment or an absolute path of its own; this function is
-/// the second, independent layer, checked right before the read. `symlink_metadata` (which does
-/// NOT follow a symlink) on `path` itself must show the expected type -- `want_dir` for the
-/// subagents directory, a plain file for everything else -- so a symlink planted at a
-/// transcript's own path is refused wherever it points, never followed; and `path`'s parent must
-/// canonicalize to somewhere inside `projects_canon` (a canonicalize failure, including a parent
-/// that does not exist, refuses the path -- it never falls back to reading the raw one).
-fn confine(path: &Path, projects_canon: &Path, want_dir: bool) -> Confinement {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(_) => return Confinement::Missing,
-    };
-    let kind_ok = if want_dir {
-        meta.file_type().is_dir()
-    } else {
-        meta.file_type().is_file()
-    };
-    if !kind_ok {
-        return Confinement::Refused;
-    }
-    let Some(parent) = path.parent() else {
-        return Confinement::Refused;
-    };
-    match parent.canonicalize() {
-        Ok(canon) if canon.starts_with(projects_canon) => Confinement::Present,
-        _ => Confinement::Refused,
     }
 }
 
