@@ -27,8 +27,17 @@ fn is_allowed_model(model: &str) -> bool {
     ALLOWED_MODEL_ALIASES.contains(&model) || model.starts_with("claude-")
 }
 
+/// Strips a leading UTF-8 BOM (Windows editors sometimes add one) and accepts either an LF
+/// (`---\n`) or a CRLF (`---\r\n`) opening fence — `agents/*.md` is checked out with CRLF line
+/// endings on Windows CI (T-0019). The closing fence search (`"\n---"`) already matches a CRLF
+/// close too, since `"\r\n---"` contains `"\n---"` as a substring; any `\r` left dangling at the
+/// end of the extracted block is stripped by `field()`'s use of `str::lines()`, which trims a
+/// trailing `\r` off each line regardless of line-ending style.
 fn frontmatter(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix("---\n")?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let rest = text
+        .strip_prefix("---\r\n")
+        .or_else(|| text.strip_prefix("---\n"))?;
     let end = rest.find("\n---")?;
     Some(&rest[..end])
 }
@@ -39,6 +48,22 @@ fn field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
         .lines()
         .find_map(|l| l.strip_prefix(&prefix))
         .map(|v| v.trim().trim_matches('"'))
+}
+
+/// Runs the CRLF path on every platform, not just windows-latest CI: a CRLF-checked-out
+/// agent file (T-0019) must parse identically to its LF form, and a leading BOM must not
+/// break the opening fence either.
+#[test]
+fn frontmatter_tolerates_crlf_and_a_leading_bom() {
+    let lf = "---\nname: probe\nmodel: sonnet\n---\nbody\n";
+    let crlf = "---\r\nname: probe\r\nmodel: sonnet\r\n---\r\nbody\r\n";
+    let crlf_with_bom = format!("\u{feff}{crlf}");
+
+    for text in [lf, crlf, crlf_with_bom.as_str()] {
+        let block = frontmatter(text).unwrap_or_else(|| panic!("no frontmatter in {text:?}"));
+        assert_eq!(field(block, "name"), Some("probe"), "{text:?}");
+        assert_eq!(field(block, "model"), Some("sonnet"), "{text:?}");
+    }
 }
 
 #[test]
