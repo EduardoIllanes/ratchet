@@ -66,7 +66,21 @@ fn git_toplevel(cwd: &Path) -> Option<PathBuf> {
     if s.is_empty() {
         return None;
     }
-    Some(PathBuf::from(s))
+    Some(native_path(&PathBuf::from(s)))
+}
+
+/// Rebuilds `p` using this platform's native separator, without touching case or resolving
+/// symlinks (unlike `repo::normalize`, which does both and is meant for comparison, not
+/// display/writing). Git always prints `/`-separated paths, even on Windows (`rev-parse
+/// --show-toplevel`, `--git-common-dir`, `worktree list --porcelain`, ...); joining that
+/// straight into a `PathBuf` with `Path::join` leaves the git-printed prefix `/`-separated
+/// while the joined suffix picks up `\`, so the result mixes separators when printed or
+/// written to a file. `Path::components()` parses both `/` and `\` as separators on Windows, so
+/// collecting them back into a fresh `PathBuf` re-renders the whole path with the native
+/// separator. Deliberately not `fs::canonicalize`, which on Windows prefixes the result with
+/// `\\?\` (a verbatim path other tools, and the tests here, do not expect).
+fn native_path(p: &Path) -> PathBuf {
+    p.components().collect()
 }
 
 #[cfg(test)]
@@ -78,5 +92,29 @@ mod tests {
     fn template_parses_with_default_branch_main() {
         let cfg: RepoConfig = toml::from_str(TEMPLATE).unwrap();
         assert_eq!(cfg.repo.default_branch.as_deref(), Some("main"));
+    }
+
+    /// The scenario CI actually hit on Windows: git prints a `/`-separated absolute path
+    /// (drive letter included), which must come back fully native-separated, not mixed.
+    #[test]
+    fn native_path_rebuilds_a_git_style_forward_slash_path_natively() {
+        let git_printed = Path::new("C:/Users/runneradmin/AppData/Local/Temp/.tmpvLAwlO");
+        let expected = Path::new("C:")
+            .join("Users")
+            .join("runneradmin")
+            .join("AppData")
+            .join("Local")
+            .join("Temp")
+            .join(".tmpvLAwlO");
+        assert_eq!(native_path(git_printed), expected);
+    }
+
+    /// A path with no separators at all to normalize is left alone.
+    #[test]
+    fn native_path_is_a_no_op_on_a_relative_single_component() {
+        assert_eq!(
+            native_path(Path::new("ratchet.toml")),
+            Path::new("ratchet.toml")
+        );
     }
 }

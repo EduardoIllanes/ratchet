@@ -223,12 +223,55 @@ fn age_stamp(path: &Path) {
     }
 }
 
+/// The `bash` Claude Code itself would run hooks through. On Windows, `CreateProcess` searches
+/// `C:\Windows\System32` before `PATH`, so a bare `Command::new("bash")` can resolve to the
+/// WSL launcher (`System32\bash.exe`) instead of Git Bash; on a runner with no registered WSL
+/// distro that launcher exits 1 with empty stderr, which looks exactly like a silent bootstrap
+/// failure but has nothing to do with the product. Resolution order: `RATCHET_TEST_BASH` (an
+/// explicit override, for anyone whose Git Bash lives somewhere unusual), then `git
+/// --exec-path` (`<git root>/mingw64/libexec/git-core` on Git for Windows) walked up to the
+/// install root and joined with `bin/bash.exe`, then the common default install path, then
+/// falling back to plain `"bash"` (correct on every non-Windows host, and a last resort on
+/// Windows too).
+fn resolve_bash() -> PathBuf {
+    if let Ok(over) = std::env::var("RATCHET_TEST_BASH") {
+        if !over.is_empty() {
+            return PathBuf::from(over);
+        }
+    }
+    if cfg!(windows) {
+        if let Ok(out) = Command::new("git").arg("--exec-path").output() {
+            if out.status.success() {
+                let exec_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !exec_path.is_empty() {
+                    // ".../mingw64/libexec/git-core" -> the Git for Windows install root.
+                    if let Some(install_root) = Path::new(&exec_path)
+                        .parent()
+                        .and_then(Path::parent)
+                        .and_then(Path::parent)
+                    {
+                        let candidate = install_root.join("bin").join("bash.exe");
+                        if candidate.is_file() {
+                            return candidate;
+                        }
+                    }
+                }
+            }
+        }
+        let default = PathBuf::from(r"C:\Program Files\Git\bin\bash.exe");
+        if default.is_file() {
+            return default;
+        }
+    }
+    PathBuf::from("bash")
+}
+
 /// Runs the real wrapper as Claude Code would: `bash <plugin>/hooks/run-hook.cmd <args>`, with
 /// `RATCHET_BIN` cleared so a developer's own environment never leaks into the test, and stdin
 /// closed (these tests call CLI subcommands like `version`, not a hook event, so nothing needs
 /// to be piped in).
 fn run_wrapper(root: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
-    let mut cmd = Command::new("bash");
+    let mut cmd = Command::new(resolve_bash());
     cmd.arg(root.join("hooks/run-hook.cmd"))
         .args(args)
         .env_remove("RATCHET_BIN")
@@ -247,7 +290,7 @@ fn run_wrapper(root: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
 /// "binary not found ... see the line above, if any" line whenever nothing ends up installed,
 /// so "exactly one line" is only ever true of bootstrap.sh's own output, not the wrapper's.
 fn run_bootstrap(root: &Path, envs: &[(&str, &str)]) -> Output {
-    let mut cmd = Command::new("bash");
+    let mut cmd = Command::new(resolve_bash());
     cmd.arg(root.join("hooks/bootstrap.sh"))
         .arg(root)
         .env_remove("RATCHET_BIN")
