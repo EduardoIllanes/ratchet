@@ -99,7 +99,7 @@ pub fn pre_tool(
     let Some(repo) = find_repo(cwd).map_err(|e| e.to_string())? else {
         return Ok(0);
     };
-    let set = load_rule_set(home, Some(&repo)).map_err(|e| e.to_string())?;
+    let set = load_rule_set(home, Some(&repo));
     let ctx = GuardContext {
         main_root: Some(repo.main_root.clone()),
         worktrees_dir: Some(repo.worktrees_dir.clone()),
@@ -209,7 +209,7 @@ fn post_tool(
     if changed.is_empty() {
         return Ok(0);
     }
-    let set = load_rule_set(home, Some(&repo)).map_err(|e| e.to_string())?;
+    let set = load_rule_set(home, Some(&repo));
     // A repo may disable `main-tree` (or replace it); honour that the same way the pre-tool
     // check does rather than reporting against a rule the repo turned off.
     let Some(rule) = set.active().find(|r| r.id == "main-tree") else {
@@ -324,13 +324,10 @@ pub fn session_start(
     export_session_id(env, &session.id);
 
     // A guardrail rule that fails validation is dropped, not fatal (T-0015): named here so the
-    // repo owner learns about it from the briefing, not only from `ratchet.log`. A genuinely
-    // broken machine/`extra` file (out of scope; unparseable, same as a broken `ratchet.toml`)
-    // falls back to no dropped-rule lines rather than costing the rest of the briefing, matching
-    // every other query in this module.
-    let dropped_rules = load_rule_set(home, Some(&repo))
-        .map(|s| s.dropped)
-        .unwrap_or_default();
+    // repo owner learns about it from the briefing, not only from `ratchet.log`. A whole layer
+    // that cannot be read or parsed at all -- the repo's own marker, or a machine/repo `extra`
+    // file -- is likewise recorded rather than fatal (T-0017), and named here too.
+    let set = load_rule_set(home, Some(&repo));
 
     // The briefing is built HERE, with this same `now`, BEFORE the sweep below, so an orphaned
     // task is shown once with its last handoff while it is still claimed. Do not move the sweep
@@ -343,7 +340,8 @@ pub fn session_start(
             &repo.main_root,
             &repo.config.thresholds,
             now,
-            &dropped_rules,
+            &set.dropped,
+            &set.broken,
         )
     );
 

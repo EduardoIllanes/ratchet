@@ -40,12 +40,17 @@ fn agent_protocol__marker_found_from_a_subdirectory() {
 }
 
 #[test]
-fn agent_protocol__invalid_marker_is_logged_and_ignored() {
+fn agent_protocol__invalid_marker_is_logged_and_the_repo_stays_opted_in() {
     let sb = sandbox();
     sb.write_marker("[repo\nthis is = not toml");
     let root = sb.root();
     let out = hook_in(&sb, "pre-tool", &bash("python scripts/x.py", &root), &root);
-    assert_eq!(code(&out), 0);
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("[ratchet guardrail:python-venv]"),
+        "{}",
+        stderr(&out)
+    );
     assert!(
         sb.log_text().contains("ratchet.toml"),
         "log: {}",
@@ -688,6 +693,52 @@ fn agent_protocol__a_bad_regex_drops_only_its_own_rule() {
         stderr(&curl_out).trim(),
         "[ratchet guardrail:no-curl] Use the repo's fetch script instead."
     );
+}
+
+// --- Requirement: A ratchet.toml or extra rules file that fails to parse degrades to
+//     built-ins, not fail-open -----------------------------------------------------
+
+#[test]
+fn agent_protocol__env_file_write_blocked_despite_a_broken_ratchet_toml() {
+    let sb = sandbox();
+    sb.write_marker("[repo\nthis is = not toml");
+    let root = sb.root();
+    let out = hook_in(
+        &sb,
+        "pre-tool",
+        &write(&root.join(".env"), "KEY=1", &root),
+        &root,
+    );
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("[ratchet guardrail:env-files]"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn agent_protocol__destructive_git_blocked_despite_a_broken_ratchet_toml() {
+    let sb = sandbox();
+    sb.write_marker("[repo\nthis is = not toml");
+    let root = sb.root();
+    let out = hook_in(&sb, "pre-tool", &bash("git reset --hard", &root), &root);
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("[ratchet guardrail:git-destructive]"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn agent_protocol__guardrails_list_refuses_on_a_broken_ratchet_toml() {
+    let sb = sandbox();
+    sb.write_marker("[repo\nthis is = not toml");
+    let root = sb.root();
+    let out = guardrails(&sb, &["list"], &root);
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    assert!(stderr(&out).contains("ratchet.toml"), "{}", stderr(&out));
 }
 
 // --- Requirement: Main-tree writes detected after the fact -------------------------

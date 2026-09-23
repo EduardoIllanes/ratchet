@@ -17,6 +17,13 @@ pub struct Repo {
     pub name: String,
     pub worktrees_dir: PathBuf,
     pub config: RepoConfig,
+    /// Set when the repo's own `ratchet.toml` exists but could not be read or parsed (T-0017).
+    /// `config` is then `RepoConfig::default()` -- built-ins only, no repo-specific settings --
+    /// rather than failing the caller: the file names an owner who asked for enforcement, so the
+    /// repo stays opted in instead of being treated as "no marker". Callers that need this to stay
+    /// fatal (the `guardrails list`/`test` diagnostics, via `load_rule_set_strict`) check it
+    /// there instead of here.
+    pub marker_error: Option<ConfigError>,
 }
 
 // Consumed by Task 9 (hooks::dispatch) and Task 10 (guardrails::cli).
@@ -31,7 +38,10 @@ pub fn find_repo(cwd: &Path) -> Result<Option<Repo>, ConfigError> {
     } else {
         checkout_root.join(MARKER)
     };
-    let cfg = config::load_repo_config(&cfg_path)?;
+    let (cfg, marker_error) = match config::load_repo_config(&cfg_path) {
+        Ok(cfg) => (cfg, None),
+        Err(e) => (RepoConfig::default(), Some(e)),
+    };
     let name = cfg.repo.name.clone().unwrap_or_else(|| {
         main_root
             .file_name()
@@ -45,6 +55,7 @@ pub fn find_repo(cwd: &Path) -> Result<Option<Repo>, ConfigError> {
         name,
         worktrees_dir,
         config: cfg,
+        marker_error,
     }))
 }
 
@@ -319,11 +330,16 @@ mod tests {
         assert_eq!(r.name, "m");
     }
 
+    /// T-0017: a marker that exists but fails to parse is not "no marker" -- the repo stays
+    /// opted in, with `RepoConfig::default()` (built-ins only) and `marker_error` naming why.
     #[test]
-    fn invalid_marker_is_an_error() {
+    fn invalid_marker_stays_opted_in_with_defaults_and_records_the_error() {
         let d = tempfile::TempDir::new().unwrap();
         marker(d.path(), "[repo\n");
-        assert!(find_repo(d.path()).is_err());
+        let r = find_repo(d.path()).unwrap().unwrap();
+        assert_eq!(r.config, RepoConfig::default());
+        let err = r.marker_error.expect("marker_error should be set");
+        assert_eq!(err.path, d.path().join(crate::config::MARKER));
     }
 
     #[test]

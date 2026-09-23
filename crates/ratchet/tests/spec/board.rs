@@ -199,6 +199,99 @@ fn agent_protocol__no_invalid_rule_no_left_out_line() {
     );
 }
 
+// --- Requirement: A ratchet.toml or extra rules file that fails to parse degrades to
+//     built-ins, not fail-open ---------------------------------------------------------------
+
+#[test]
+fn agent_protocol__briefing_names_the_broken_ratchet_toml_and_the_reason() {
+    let sb = sandbox();
+    sb.write_marker("[repo\nthis is = not toml");
+    let root = sb.root();
+    let out = hook_env(
+        &sb,
+        "session-start",
+        &session_payload("s-brokentoml", &root),
+        &root,
+        &[("RATCHET_NOW", T0)],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let printed = lines(&out);
+    assert!(!printed.is_empty(), "briefing should not be empty");
+    let matches: Vec<&String> = printed
+        .iter()
+        .filter(|l| l.contains("ratchet.toml"))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one line naming the broken file: {printed:?}"
+    );
+    // The spec also asks for the reason (the parse error); without reading the implementation we
+    // can't assert its exact wording, so this only checks the line carries more than just the
+    // filename -- a loose proxy for "and the reason".
+    assert!(
+        matches[0].len() > "ratchet.toml".len() + 10,
+        "line looks too short to carry a reason: {:?}",
+        matches[0]
+    );
+}
+
+#[test]
+fn agent_protocol__a_broken_extra_rules_file_still_leaves_builtins_and_inline_rules_blocking() {
+    let sb = sandbox();
+    sb.write_marker(
+        "[repo]\nworktrees_dir = \".worktrees\"\n\n[guardrails]\nextra = \"ratchet/guardrails.toml\"\n\n[[guardrails.rules]]\nname = \"no-curl\"\nmatch = '^\\s*curl\\b'\nmessage = \"Use the repo's fetch script instead.\"\n",
+    );
+    sb.write("ratchet/guardrails.toml", "[[rules\nthis is = not toml");
+    let root = sb.root();
+
+    let env_out = hook_in(
+        &sb,
+        "pre-tool",
+        &write(&root.join(".env"), "KEY=1", &root),
+        &root,
+    );
+    assert_eq!(code(&env_out), 2, "stderr: {}", stderr(&env_out));
+    assert!(
+        stderr(&env_out).starts_with("[ratchet guardrail:env-files]"),
+        "{}",
+        stderr(&env_out)
+    );
+
+    let curl_out = hook_in(
+        &sb,
+        "pre-tool",
+        &bash("curl https://example.com", &root),
+        &root,
+    );
+    assert_eq!(code(&curl_out), 2, "stderr: {}", stderr(&curl_out));
+    assert!(
+        stderr(&curl_out).starts_with("[ratchet guardrail:no-curl]"),
+        "{}",
+        stderr(&curl_out)
+    );
+
+    let briefing = hook_env(
+        &sb,
+        "session-start",
+        &session_payload("s-brokenextra", &root),
+        &root,
+        &[("RATCHET_NOW", T0)],
+    );
+    assert_eq!(code(&briefing), 0, "{}", stderr(&briefing));
+    let printed = lines(&briefing);
+    assert!(!printed.is_empty(), "briefing should not be empty");
+    let matches: Vec<&String> = printed
+        .iter()
+        .filter(|l| l.contains("guardrails.toml"))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one line naming the broken extra file: {printed:?}"
+    );
+}
+
 // --- Requirement: Task reminder on every prompt ---------------------------------------------
 
 #[test]

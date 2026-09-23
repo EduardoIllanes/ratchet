@@ -15,8 +15,11 @@ carries the alternative the agent should use instead, so it corrects itself in o
 A repo SHALL opt in to ratchet by having a `ratchet.toml` at its root. Every hook SHALL
 resolve the repo from the working directory of the tool call by walking up to the nearest
 marker; when the working directory is a linked git worktree, the repo root SHALL be the main
-checkout that owns it. Without a marker, every hook SHALL exit 0 immediately without reading
-any other file. An unreadable or invalid marker SHALL be logged and treated as "no marker".
+checkout that owns it. Without a marker — no `ratchet.toml` anywhere above the working
+directory — every hook SHALL exit 0 immediately without reading any other file. A marker that
+exists but cannot be read or parsed SHALL NOT be treated as "no marker": the repo is still
+opted in, logged, and falls back to the built-in rules exactly as *A ratchet.toml or extra
+rules file that fails to parse degrades to built-ins, not fail-open* describes.
 
 #### Scenario: No marker, hooks do nothing
 - **WHEN** the pre-tool hook receives `python scripts/x.py` from a directory with no `ratchet.toml` above it
@@ -26,9 +29,9 @@ any other file. An unreadable or invalid marker SHALL be logged and treated as "
 - **WHEN** the working directory is `src/deep` inside a repo that has `.venv` and `ratchet.toml` at its root and the tool call is `python scripts/x.py`
 - **THEN** the hook blocks with the python-venv rule
 
-#### Scenario: Invalid marker is logged and ignored
-- **WHEN** `ratchet.toml` is not valid TOML and the tool call is `python scripts/x.py`
-- **THEN** the hook exits 0 and the log file contains one line naming `ratchet.toml`
+#### Scenario: Invalid marker is logged and the repo stays opted in
+- **WHEN** `ratchet.toml` is not valid TOML and the tool call is `python scripts/x.py` in a repo with `.venv`
+- **THEN** the hook blocks with rule `python-venv`, and the log file contains one line naming `ratchet.toml`
 
 ### Requirement: Marker can be generated
 `ratchet config init` SHALL write a commented `ratchet.toml` at the root of the git repository
@@ -214,6 +217,42 @@ loading the resilient rule set the hooks use.
 #### Scenario: No invalid rule, no left-out line
 - **WHEN** the repo has no invalid guardrail rule and the session-start hook runs
 - **THEN** the briefing has no line naming a rule left out
+
+### Requirement: A ratchet.toml or extra rules file that fails to parse degrades to built-ins, not fail-open
+A repo whose `ratchet.toml` exists but fails to parse — bad TOML syntax, or a top-level shape
+the schema does not accept — is still an opted-in repo, not "no marker" (see *Repo opt-in by
+marker*): the file exists and names an owner who asked for enforcement, and allowing every tool
+call for the rest of the session over a typo is worse than enforcing what ratchet already knows
+how to enforce. When the repo's `ratchet.toml` or its extra rules file cannot be parsed, ratchet
+SHALL keep enforcing the built-in rules (and every layer that did parse), SHALL write a
+`ratchet.log` entry naming the file and the parse error, and the session-start briefing SHALL
+still be printed with one line naming the file that could not be read and the reason, telling
+the owner to fix it. `ratchet guardrails list` and `ratchet guardrails test` SHALL keep refusing
+with exit 1, since they validate the raw config directly rather than loading the resilient rule
+set the hooks use.
+
+#### Scenario: Env file write blocked despite a broken ratchet.toml
+- **WHEN** `ratchet.toml` has a TOML syntax error and a `Write` targets `.env`
+- **THEN** the pre-tool hook still blocks with the built-in rule `env-files` (exit 2)
+
+#### Scenario: Destructive git blocked despite a broken ratchet.toml
+- **WHEN** `ratchet.toml` has a TOML syntax error and the tool call is `git reset --hard`
+- **THEN** the pre-tool hook still blocks with the built-in rule `git-destructive` (exit 2)
+
+#### Scenario: Briefing names the broken ratchet.toml and the reason
+- **WHEN** `ratchet.toml` has a TOML syntax error and the session-start hook runs
+- **THEN** stdout is not empty, and has exactly one line naming `ratchet.toml` and the parse error
+
+#### Scenario: A broken extra rules file still leaves builtins and inline rules blocking
+- **WHEN** the repo's extra rules file has a TOML syntax error, the repo's own `ratchet.toml`
+  also declares a valid inline `[[guardrails.rules]]` rule, and a `Write` targets `.env`
+- **THEN** the pre-tool hook still blocks with the built-in rule `env-files`, a tool call
+  matching the inline rule's own pattern is still blocked by it, and the session-start briefing
+  names the extra rules file
+
+#### Scenario: guardrails list refuses on a broken ratchet.toml
+- **WHEN** `ratchet.toml` has a TOML syntax error and `ratchet guardrails list` runs
+- **THEN** it exits 1 and stderr names `ratchet.toml`
 
 ### Requirement: Main-tree writes detected after the fact
 In PostToolUse for `Bash` and `PowerShell` inside an opted-in repo, ratchet SHALL compare the
