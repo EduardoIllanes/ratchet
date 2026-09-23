@@ -702,6 +702,7 @@ fn tasks__done_allowed_after_an_approve_from_another_session() {
     let id = new_task(&sb, "properly reviewed", &["only criterion"], "s-25", 2);
     assert_eq!(code(&task(&sb, &["claim", &id], "s-25", 3)), 0);
     assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-25", 4)), 0);
+    let review_cmd = format!("ratchet task review {id} approve \"clean diff, gate green\"");
     assert_eq!(
         code(&task(
             &sb,
@@ -718,9 +719,80 @@ fn tasks__done_allowed_after_an_approve_from_another_session() {
         )),
         0
     );
-    let out = task(&sb, &["status", &id, "done"], "s-25", 6);
+    // A bare-session approve needs the same transcript proof (H3) as a paired one — the spec's
+    // own prose already required it for every approving identity (T-0016 review verdict).
+    let root = sb.root();
+    let tb = TranscriptBuilder::new();
+    write_review_call_transcript(&tb, &root, "s-reviewer", None, &at(6), &review_cmd);
+    let projects = tb.root.path().to_string_lossy().to_string();
+    let out = cli(
+        &sb,
+        &["task", "status", &id, "done"],
+        &root,
+        &[
+            ("RATCHET_SESSION_ID", "s-25"),
+            ("RATCHET_NOW", &at(7)),
+            ("RATCHET_CLAUDE_PROJECTS", &projects),
+        ],
+    );
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     assert_eq!(task_state(&sb, &id).0, "done");
+}
+
+#[test]
+fn tasks__done_refused_for_a_registered_bare_session_whose_transcript_lacks_the_review() {
+    let sb = board("s-45");
+    // A bare session hand-registered through the real session-start hook — exactly the shape
+    // T-0016's review flagged: no Agent SDK process, no transcript, ever behind it. With no
+    // agent identity, H3 (require_reviewer_transcript in cli/task_cmd.rs) returns early today
+    // and never checks a bare identity's transcript at all, so this currently reaches `done`
+    // with zero transcript ever written — the assertion below pins the required fix, not the
+    // current behavior.
+    assert_eq!(code(&join(&sb, "s-reviewer2", 1)), 0);
+    let id = new_task(
+        &sb,
+        "bare reviewer with no proof",
+        &["only criterion"],
+        "s-45",
+        2,
+    );
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-45", 3)), 0);
+    assert_eq!(code(&task(&sb, &["check", &id, "1"], "s-45", 4)), 0);
+    assert_eq!(
+        code(&task(
+            &sb,
+            &[
+                "review",
+                &id,
+                "approve",
+                "looks fine",
+                "--session",
+                "s-reviewer2"
+            ],
+            "s-45",
+            5
+        )),
+        0
+    );
+    // No transcript at all is written for s-reviewer2 -- H3 has nothing to find.
+    let tb = TranscriptBuilder::new();
+    let projects = tb.root.path().to_string_lossy().to_string();
+    let root = sb.root();
+    let out = cli(
+        &sb,
+        &["task", "status", &id, "done"],
+        &root,
+        &[
+            ("RATCHET_SESSION_ID", "s-45"),
+            ("RATCHET_NOW", &at(6)),
+            ("RATCHET_CLAUDE_PROJECTS", &projects),
+        ],
+    );
+    assert_eq!(code(&out), 1, "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.to_lowercase().contains("transcript"), "{err}");
+    assert!(err.contains("task review"), "{err}");
+    assert_eq!(task_state(&sb, &id).0, "in_progress");
 }
 
 #[test]

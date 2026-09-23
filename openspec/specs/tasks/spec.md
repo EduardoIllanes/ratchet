@@ -256,10 +256,19 @@ identity's transcript carries no matching review command.
   `--unreviewed` as the owner's option
 
 #### Scenario: Done allowed after an approve from another session
-- **WHEN** a task's checklist is complete and its most recent `review.verdict` event is `approve`,
+- **WHEN** a task's checklist is complete, its most recent `review.verdict` event is `approve`,
   recorded by a session ratchet registered that never claimed the task and never checked off one
-  of its items
+  of its items, and that session's own transcript contains a `Bash` tool call whose command
+  contains `task review <id>`
 - **THEN** the task moves to `done`
+
+#### Scenario: Done refused for a registered bare session whose transcript lacks the review
+- **WHEN** a task's most recent `review.verdict` event is `approve`, recorded by a session
+  ratchet registered — hand-registered through the session-start hook counts — that is
+  independent by every other rule, but no transcript located for that session contains a `Bash`
+  tool call whose command contains `task review <id>`
+- **THEN** the operation is refused, saying the approving identity's transcript carries no
+  matching review command
 
 #### Scenario: Done refused when a changes verdict is newer than the approve
 - **WHEN** a task received an `approve` from an independent session and then a later `changes`
