@@ -123,6 +123,54 @@ NOT fail the hook: the event is recorded with whatever identity is known.
 - **WHEN** a subagent stop carries an agent identifier but no type and no meta file exists for it
 - **THEN** the hook exits successfully and the `subagent.stop` event is recorded with the identifier alone
 
+### Requirement: A subagent's board write is attributed to it
+Before every `Bash` or `PowerShell` tool call, the pre-tool hook SHALL record a pending call:
+the session, the agent identifier when the call comes from a subagent (absent for the main
+thread), the agent type, the tool call's identifier, its command text and the time. The
+post-tool hook SHALL remove that pending call by its tool call identifier; a subagent stop
+SHALL remove every pending call left by that agent; ending the session and a periodic sweep of
+calls older than fifteen minutes SHALL remove what is left. A write to the task board (`claim`,
+`check`, `note`, `handoff`, `review` or `status`) SHALL resolve its session exactly as before,
+then look among that session's own open pending calls for ones whose command text contains both
+the task's identifier and the write's subcommand word — and, for a review, the verdict word too
+— anywhere in the text. Exactly one such call carrying an agent identifier SHALL attribute the
+write to that session paired with that agent: the write's event SHALL carry that agent's
+identifier and its agent type. One such call with no agent identifier, none at all, or more
+than one SHALL leave the write attributed to the bare session instead, exactly as before this
+requirement existed — ambiguity SHALL fail closed, never toward a subagent. A pending call
+SHALL NOT be consumed by a match, so more than one board write inside the same tool call can
+still be attributed. Neither `--session` nor `RATCHET_SESSION_ID` SHALL be able to name an agent
+identity directly: a value containing `/` SHALL be refused, naming that a session identifier
+cannot contain `/`, before any registration lookup or attribution runs and before anything is
+written — this refusal is distinct from, and takes priority over, "session … is not registered".
+
+#### Scenario: A board write inside a single matching subagent call is attributed to it
+- **WHEN** a subagent's `Bash` call running a board write for a task is open — its pre-tool call
+  recorded, no post-tool yet — and it is the only pending call in its session naming that task
+  and that write's subcommand
+- **THEN** the write's event carries that agent's identifier and its agent type
+
+#### Scenario: A main-thread call stays attributed to the bare session
+- **WHEN** the main thread, not a subagent, makes the same board write, with its own pre-tool
+  call recorded and no agent identifier
+- **THEN** the write's event carries the session alone, with no agent identifier
+
+#### Scenario: Two open matching calls stay attributed to the bare session
+- **WHEN** two subagents' `Bash` calls in the same session are both open and both name the same
+  task and the same write's subcommand
+- **THEN** the write's event carries the session alone, with no agent identifier
+
+#### Scenario: A post-tool call clears its pending call
+- **WHEN** a subagent's `Bash` call naming a task and a write's subcommand completes and its
+  post-tool hook fires, and the same board write is made again afterward
+- **THEN** the write's event carries the session alone, with no agent identifier, because the
+  pending call no longer exists
+
+#### Scenario: A session identifier cannot express an agent identity
+- **WHEN** `--session` or `RATCHET_SESSION_ID` is given a value containing `/`
+- **THEN** the command is refused, naming that a session identifier cannot contain `/` — not the
+  generic "is not registered" refusal — and nothing is written
+
 ### Requirement: Derived session state
 The state of a session SHALL be derived, never stored: ended when it has an end; otherwise
 live while the last signal is recent, idle after the live threshold, and orphaned after the
