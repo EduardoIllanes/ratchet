@@ -316,6 +316,42 @@ the latency ceiling.
 - **WHEN** `ratchet.toml` sets `big_read_lines = 1000` under `[guardrails]` and a `Read` targets a 400-line main-tree file with no window
 - **THEN** the hook allows it, and with `big_read_lines = 100` it blocks
 
+### Requirement: The PreToolUse matcher covers every builtin rule tool
+Claude Code only calls a hook for an event when that event's matcher matches the tool of the
+call; a builtin rule whose `tools` names a tool absent from `hooks/hooks.json`'s `PreToolUse`
+matcher can never fire in a real session, no matter how correct the rule's own logic is. The
+`PreToolUse` entry of `hooks/hooks.json` SHALL declare a matcher (a `|`-separated tool list)
+that includes every tool named in any builtin rule's `tools` in `builtin.toml` — in particular
+`Read`, which the `big-read` rule needs for its whole-file-read half.
+
+#### Scenario: PreToolUse matcher covers every builtin rule tool
+- **WHEN** `hooks/hooks.json` is read
+- **THEN** its `PreToolUse` matcher (a `|`-separated tool list) includes every tool named in any
+  builtin rule's `tools` in `builtin.toml`, in particular `Read`
+
+### Requirement: Git Bash / MSYS drive paths resolve to their Windows form
+ON WINDOWS ONLY, before a path-based guardrail rule makes its absolute/relative decision about
+a tool-input path, a path of the form `/<drive-letter>/rest` or `/cygdrive/<drive-letter>/rest`
+SHALL be read as `<DRIVE>:/rest`. This applies to every rule that resolves a tool-input path on
+Windows: `big-read` (a `Read` call's `file_path`, and the target of a `cat`/`head`/`tail`/
+`less`/`more` `Bash`/`PowerShell` segment) and `main-tree` (the `file_path`/`notebook_path` of an
+`Edit`/`Write`/`NotebookEdit`/`MultiEdit` call, and the write target of a recognised `Bash`/
+`PowerShell` writing shape). On every other platform such a path is already a normal absolute
+path and SHALL NOT be translated. The `[guardrails] big_read_lines` threshold (default 350) is
+unaffected by this translation.
+
+#### Scenario: Git Bash drive path resolves on Windows
+- **WHEN** on Windows the tool call is `head -n 3 /c/…/big.py` through `Bash`, where the drive
+  letter maps to the sandbox's main tree and `big.py` is a tracked 400-line file there, or the
+  same command with the path written as `/cygdrive/c/…`, or a `Read` with `file_path`
+  `/c/…/big.py` and no window
+- **THEN** the hook blocks each of them with rule `big-read`
+
+#### Scenario: Git Bash path write into the main tree blocked on Windows
+- **WHEN** on Windows the tool call is `echo x > /c/…/tracked.txt` through `Bash`, where the
+  drive letter maps to the sandbox's main tree and `tracked.txt` is tracked there
+- **THEN** the hook blocks with rule `main-tree`
+
 ### Requirement: Hooks never break a session
 On any internal error (invalid config, malformed payload, unexpected failure) a hook SHALL
 exit 0 without blocking and SHALL append one line to the log file under the state
