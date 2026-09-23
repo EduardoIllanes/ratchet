@@ -9,5 +9,6 @@ fn version_prints_name_and_semver() {
         .unwrap();
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
-    assert!(text.starts_with("ratchet 0.1.0"), "got: {text}");
+    let expected = format!("ratchet {}", env!("CARGO_PKG_VERSION"));
+    assert!(text.starts_with(&expected), "got: {text}");
 }

@@ -6,19 +6,21 @@ committed to this repository and must be in place before any hook can do useful 
 ## Purpose
 
 The plugin ships hooks and markdown only. `bin/ratchet` arrives on first use: this capability
-downloads the release asset for the current platform matching the plugin's version, verifies it
-against the release's checksums, and unpacks it into `bin/`, so adding the plugin is the only
-step a user ever has to take. A failure here must never break a Claude Code session.
+downloads the release asset for the current platform matching the version pinned in
+`.claude-plugin/binary-version`, verifies it against the release's checksums, and unpacks it
+into `bin/`, so adding the plugin is the only step a user ever has to take. A failure here must never break a Claude Code session.
 
 ## Requirements
 
 ### Requirement: Binary bootstrap on first run
 When no binary is found (`RATCHET_BIN` unset or not executable, nothing in `bin/`), the hook
 wrapper SHALL run `hooks/bootstrap.sh`, which SHALL download the release asset for the current
-platform matching the plugin version, verify it against the release's `SHA256SUMS.txt`, unpack
-it into `bin/`, and the wrapper SHALL then run it. Any failure SHALL leave the session
+platform matching the version pinned in `.claude-plugin/binary-version`, verify it against the
+release's `SHA256SUMS.txt`, unpack it into `bin/`, and the wrapper SHALL then run it. Any failure SHALL leave the session
 untouched: exit 0, one stderr line naming the manual path, and a stamp that keeps later hooks
-silent for 60 minutes. An existing binary SHALL never be replaced by bootstrap.
+silent for 60 minutes. An existing binary SHALL never be replaced by bootstrap. `plugin.json`
+SHALL carry no `version`, so Claude Code tracks the marketplace commit and changes to agents,
+skills and hooks reach users without a binary release.
 
 #### Scenario: First run downloads, verifies and runs the binary
 - **WHEN** the wrapper runs `version` with an empty `bin/` and `RATCHET_RELEASE_BASE` pointing at a directory holding a valid archive and sums file

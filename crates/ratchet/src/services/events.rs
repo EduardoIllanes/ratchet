@@ -19,11 +19,40 @@ pub fn emit(
     task_id: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<Event, ServiceError> {
+    emit_attributed(conn, kind, payload, source, session_id, None, task_id, now)
+}
+
+/// Same as `emit`, plus the subagent identity (T-0016) a board write resolved through
+/// `pending_calls::resolve`: `agent` is `(agent_id, agent_type)`. `agent_id` lands in its own
+/// nullable column, so every existing `session_id` query (usage's `attribute.rs`, the briefing,
+/// the done gate) keeps working unmodified; `agent_type` has no column of its own and is folded
+/// into the JSON payload instead, the only place anything reads it back for display. `agent:
+/// None` behaves exactly like plain `emit`: no column, no payload keys, bare session as before
+/// this requirement existed.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_attributed(
+    conn: &Connection,
+    kind: EventKind,
+    payload: &Value,
+    source: Source,
+    session_id: Option<&str>,
+    agent: Option<(&str, &str)>,
+    task_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<Event, ServiceError> {
+    let mut payload = payload.clone();
+    let agent_id = agent.map(|(id, _)| id);
+    if let (Some(obj), Some((id, ty))) = (payload.as_object_mut(), agent) {
+        obj.insert("agent_id".to_string(), Value::String(id.to_string()));
+        obj.insert("agent_type".to_string(), Value::String(ty.to_string()));
+    }
     conn.execute(
-        "INSERT INTO events(ts, session_id, task_id, kind, payload, source) VALUES (?1,?2,?3,?4,?5,?6)",
+        "INSERT INTO events(ts, session_id, agent_id, task_id, kind, payload, source) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7)",
         params![
             clock::iso(now),
             session_id,
+            agent_id,
             task_id,
             kind.as_str(),
             payload.to_string(),
@@ -34,9 +63,10 @@ pub fn emit(
         id: conn.last_insert_rowid(),
         ts: now,
         session_id: session_id.map(str::to_string),
+        agent_id: agent_id.map(str::to_string),
         task_id: task_id.map(str::to_string),
         kind: kind.as_str().to_string(),
-        payload: payload.clone(),
+        payload,
         source,
     })
 }
@@ -161,6 +191,51 @@ mod tests {
         assert_eq!(task.len(), 1);
         assert_eq!(task[0].payload["text"], "hi");
         assert_eq!(task[0].source, Source::Cli);
+    }
+
+    #[test]
+    fn emit_attributed_stores_the_agent_id_and_folds_the_type_into_the_payload() {
+        let c = conn();
+        let ev = emit_attributed(
+            &c,
+            EventKind::ChecklistDone,
+            &json!({"position": 1}),
+            Source::Cli,
+            Some("s-1"),
+            Some(("agent-abc", "ratchet:implementer")),
+            Some("T-0001"),
+            at("2026-09-16T12:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(ev.agent_id.as_deref(), Some("agent-abc"));
+        assert_eq!(ev.payload["agent_id"], "agent-abc");
+        assert_eq!(ev.payload["agent_type"], "ratchet:implementer");
+        let (stored_agent, stored_payload): (Option<String>, String) = c
+            .query_row(
+                "SELECT agent_id, payload FROM events WHERE id = ?1",
+                [ev.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_agent.as_deref(), Some("agent-abc"));
+        assert!(stored_payload.contains("agent-abc"));
+    }
+
+    #[test]
+    fn plain_emit_leaves_the_agent_column_and_payload_untouched() {
+        let c = conn();
+        let ev = emit(
+            &c,
+            EventKind::Note,
+            &json!({"text": "hi"}),
+            Source::Cli,
+            Some("s-1"),
+            None,
+            at("2026-09-16T12:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(ev.agent_id, None);
+        assert!(!ev.payload.to_string().contains("agent_id"));
     }
 
     #[test]

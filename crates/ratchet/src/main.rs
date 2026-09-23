@@ -7,11 +7,13 @@ mod db;
 mod guardrails;
 mod hooks;
 mod log;
+mod map;
 mod model;
 mod output;
 mod pdf;
 mod repo;
 mod services;
+mod usage;
 
 use std::collections::HashMap;
 
@@ -60,10 +62,25 @@ enum Cmd {
         cmd: SessionCmd,
     },
     /// The task board: `list`, `show`, `new`, `claim`, `status`, `check`, `note`, `handoff`,
-    /// `archive`, `unarchive`.
+    /// `review`, `archive`, `unarchive`.
     Task {
         #[command(subcommand)]
         cmd: TaskCmd,
+    },
+    /// Repo orientation: a deterministic map of the tree, written to `.ratchet/map.md`.
+    Map {
+        #[command(subcommand)]
+        cmd: Option<MapCmd>,
+        /// List source files with no header and no note instead of generating.
+        #[arg(long)]
+        missing: bool,
+        /// With --missing, widen to every undescribed file, not just those changed since the
+        /// map's recorded commit.
+        #[arg(long)]
+        all: bool,
+        /// Wire CLAUDE.md and .gitignore, then generate.
+        #[arg(long)]
+        wire: bool,
     },
     /// Extract text from a local PDF via the external `liteparse` CLI.
     Pdf {
@@ -75,6 +92,25 @@ enum Cmd {
         /// Force OCR from the start; skips the fast pass.
         #[arg(long)]
         ocr: bool,
+    },
+    /// Token cost per task, role and model, read from Claude Code's own transcripts.
+    Usage {
+        /// Show one task instead of the window's listing.
+        id: Option<String>,
+        /// Aggregate across the window: task, role, model or session.
+        #[arg(long)]
+        by: Option<String>,
+        /// Window: "7d", "30d" or a date (default 7d).
+        #[arg(long)]
+        since: Option<String>,
+        /// Drop the repo filter.
+        #[arg(long = "all-repos")]
+        all_repos: bool,
+        #[arg(long)]
+        json: bool,
+        /// Append the one-task summary as a note on `<id>` (requires `<id>`).
+        #[arg(long)]
+        note: bool,
     },
 }
 
@@ -189,29 +225,55 @@ enum TaskCmd {
         /// Reason; required to close a task that has no checklist.
         #[arg(long)]
         why: Option<String>,
+        /// Owner-only escape hatch: closes a task as `done` without an independent review
+        /// verdict, and records a note saying so. The checklist requirement still applies.
+        #[arg(long)]
+        unreviewed: bool,
         #[arg(long)]
         json: bool,
     },
-    /// Mark a checklist item as done, or undo it.
+    /// Record an independent review verdict (`approve` or `changes`) with free text. Never
+    /// changes status; `status <id> done` is what reads it back.
+    Review {
+        id: String,
+        verdict: String,
+        text: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark one or more checklist items as done, in order, or undo them. A bad number anywhere
+    /// in the list refuses the whole call before marking anything.
     Check {
         id: String,
-        position: i64,
+        #[arg(required = true, num_args = 1..)]
+        positions: Vec<i64>,
         #[arg(long)]
         undo: bool,
         #[arg(long)]
         json: bool,
     },
-    /// Record a decision or a finding on a task.
+    /// Record one or more decisions or findings on a task, each its own event, in order.
     Note {
         id: String,
-        text: String,
+        #[arg(required = true, num_args = 1..)]
+        texts: Vec<String>,
         #[arg(long)]
         json: bool,
     },
-    /// Record what is left and how to resume.
+    /// Record what is left and how to resume; `--status` also applies that transition (the same
+    /// rules `task status` applies), after the handoff is recorded either way.
     Handoff {
         id: String,
         text: String,
+        /// Move the task to this status after recording the handoff.
+        #[arg(long)]
+        status: Option<String>,
+        /// Reason forwarded to the transition; required to close a task with no checklist.
+        #[arg(long)]
+        why: Option<String>,
+        /// Owner-only escape hatch forwarded to the transition (see `task status --unreviewed`).
+        #[arg(long)]
+        unreviewed: bool,
         #[arg(long)]
         json: bool,
     },
@@ -227,6 +289,14 @@ enum TaskCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum MapCmd {
+    /// Record one description for a header-less file.
+    Note { path: String, sentence: String },
+    /// Print the map's freshness line, or `map: current`.
+    Status,
 }
 
 fn main() {
@@ -328,27 +398,55 @@ fn main() {
             TaskCmd::Claim { id, json } => {
                 cli::task_cmd::claim(&env, cwd, session.as_deref(), &id, json)
             }
-            TaskCmd::Status { id, to, why, json } => cli::task_cmd::status(
+            TaskCmd::Status {
+                id,
+                to,
+                why,
+                unreviewed,
+                json,
+            } => cli::task_cmd::status(
                 &env,
                 cwd,
                 session.as_deref(),
                 &id,
                 &to,
                 why.as_deref(),
+                unreviewed,
                 json,
             ),
+            TaskCmd::Review {
+                id,
+                verdict,
+                text,
+                json,
+            } => cli::task_cmd::review(&env, cwd, session.as_deref(), &id, &verdict, &text, json),
             TaskCmd::Check {
                 id,
-                position,
+                positions,
                 undo,
                 json,
-            } => cli::task_cmd::check(&env, cwd, session.as_deref(), &id, position, undo, json),
-            TaskCmd::Note { id, text, json } => {
-                cli::task_cmd::note(&env, cwd, session.as_deref(), &id, &text, json)
+            } => cli::task_cmd::check(&env, cwd, session.as_deref(), &id, &positions, undo, json),
+            TaskCmd::Note { id, texts, json } => {
+                cli::task_cmd::note(&env, cwd, session.as_deref(), &id, &texts, json)
             }
-            TaskCmd::Handoff { id, text, json } => {
-                cli::task_cmd::handoff(&env, cwd, session.as_deref(), &id, &text, json)
-            }
+            TaskCmd::Handoff {
+                id,
+                text,
+                status,
+                why,
+                unreviewed,
+                json,
+            } => cli::task_cmd::handoff(
+                &env,
+                cwd,
+                session.as_deref(),
+                &id,
+                &text,
+                status.as_deref(),
+                why.as_deref(),
+                unreviewed,
+                json,
+            ),
             TaskCmd::Archive { id, json } => {
                 cli::task_cmd::archive(&env, cwd, session.as_deref(), &id, json)
             }
@@ -356,7 +454,36 @@ fn main() {
                 cli::task_cmd::unarchive(&env, cwd, session.as_deref(), &id, json)
             }
         },
+        Cmd::Map {
+            cmd,
+            missing,
+            all,
+            wire,
+        } => match cmd {
+            Some(MapCmd::Note { path, sentence }) => cli::map_cmd::note(&path, &sentence, cwd),
+            Some(MapCmd::Status) => cli::map_cmd::status(cwd),
+            None if missing => cli::map_cmd::missing(all, cwd),
+            None => cli::map_cmd::generate(wire, &env, cwd),
+        },
         Cmd::Pdf { file, pages, ocr } => cli::pdf_cmd::run(&file, pages.as_deref(), ocr, &env),
+        Cmd::Usage {
+            id,
+            by,
+            since,
+            all_repos,
+            json,
+            note,
+        } => cli::usage_cmd::run(
+            &env,
+            cwd,
+            session.as_deref(),
+            id.as_deref(),
+            by.as_deref(),
+            since.as_deref(),
+            all_repos,
+            json,
+            note,
+        ),
     };
     std::process::exit(code);
 }

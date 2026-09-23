@@ -72,22 +72,104 @@ no marker above it, nothing SHALL be registered.
 - **THEN** it exits successfully, prints nothing, and no database is created
 
 ### Requirement: Heartbeat
-Every user prompt, every end of a response, every end of a subagent and every compaction
-SHALL refresh the last signal of the session. A prompt and an end of response SHALL also
-record an event; a subagent end and a compaction SHALL NOT. A hook that arrives for a
-session that is not registered yet SHALL register it instead of failing.
+Every user prompt, every end of a response, every subagent start, every subagent end and
+every compaction SHALL refresh the last signal of the session. A prompt, an end of response,
+a subagent start and a subagent end SHALL also record an event; a compaction SHALL NOT. A
+hook that arrives for a session that is not registered yet SHALL register it instead of
+failing.
 
 #### Scenario: A prompt updates the last signal
 - **WHEN** a prompt arrives for a registered session
 - **THEN** its last signal moves forward and a prompt event is recorded
 
-#### Scenario: Compaction and subagent end update the last signal
-- **WHEN** a compaction and then a subagent end arrive for a registered session
-- **THEN** its last signal moves forward and no extra event is recorded for either
+#### Scenario: Compaction updates the last signal with no event
+- **WHEN** a compaction arrives for a registered session
+- **THEN** its last signal moves forward and no extra event is recorded for it
 
 #### Scenario: A hook of an unregistered session registers it
 - **WHEN** the first hook to arrive for a session identifier is a prompt, not a session start
 - **THEN** the session is registered and its last signal is set
+
+### Requirement: Subagent start and stop
+A subagent start SHALL record a `subagent.start` event and a subagent end a `subagent.stop`
+event, both attributed to the session the hook arrived for. When that session holds tasks in
+progress, the event SHALL carry the first of them as its task; when it holds none, the event
+SHALL carry no task. The payload SHALL carry the agent identifier, its type and description
+when known, and the transcript path when the input offers one; a stop SHALL also carry the
+exit status when the input offers one. When the input carries an agent identifier but no
+type, the hook SHALL read the file `agent-<id>.meta.json` from the `subagents` directory of
+that session next to the transcript — the directory named after the session beside the
+transcript path — without ever writing to it, and take the type and description from its
+`agentType` and `description` fields when present. A missing or unreadable meta file SHALL
+NOT fail the hook: the event is recorded with whatever identity is known.
+
+#### Scenario: A subagent start records a start event
+- **WHEN** a subagent start with an agent identifier, a type and a transcript path arrives for a session holding a task in progress
+- **THEN** its last signal moves forward and one `subagent.start` event is recorded with that task and a payload carrying the agent identifier, the type and the transcript path
+
+#### Scenario: A subagent stop records a stop event
+- **WHEN** a subagent stop with an agent identifier, a type, a transcript path and an exit status arrives for a session holding a task in progress
+- **THEN** one `subagent.stop` event is recorded with that task and a payload carrying the agent identifier, the type, the transcript path and the exit status
+
+#### Scenario: A stop with no held task records a session-level event
+- **WHEN** a subagent stop arrives for a session holding no task in progress
+- **THEN** one `subagent.stop` event is recorded with no task
+
+#### Scenario: A missing type falls back to the meta file
+- **WHEN** a subagent stop carries an agent identifier and a transcript path but no type, and the meta file for that agent beside that transcript names a type and a description
+- **THEN** the recorded `subagent.stop` event carries that type and that description
+
+#### Scenario: A missing meta file still records
+- **WHEN** a subagent stop carries an agent identifier but no type and no meta file exists for it
+- **THEN** the hook exits successfully and the `subagent.stop` event is recorded with the identifier alone
+
+### Requirement: A subagent's board write is attributed to it
+Before every `Bash` or `PowerShell` tool call, the pre-tool hook SHALL record a pending call:
+the session, the agent identifier when the call comes from a subagent (absent for the main
+thread), the agent type, the tool call's identifier, its command text and the time. The
+post-tool hook SHALL remove that pending call by its tool call identifier; a subagent stop
+SHALL remove every pending call left by that agent; ending the session and a periodic sweep of
+calls older than fifteen minutes SHALL remove what is left. A write to the task board (`claim`,
+`check`, `note`, `handoff`, `review` or `status`) SHALL resolve its session exactly as before,
+then look among that session's own open pending calls for ones whose command text contains both
+the task's identifier and the write's subcommand word — and, for a review, the verdict word too
+— anywhere in the text. Exactly one such call carrying an agent identifier SHALL attribute the
+write to that session paired with that agent: the write's event SHALL carry that agent's
+identifier and its agent type. One such call with no agent identifier, none at all, or more
+than one SHALL leave the write attributed to the bare session instead, exactly as before this
+requirement existed — ambiguity SHALL fail closed, never toward a subagent. A pending call
+SHALL NOT be consumed by a match, so more than one board write inside the same tool call can
+still be attributed. Neither `--session` nor `RATCHET_SESSION_ID` SHALL be able to name an agent
+identity directly: a value containing `/` SHALL be refused, naming that a session identifier
+cannot contain `/`, before any registration lookup or attribution runs and before anything is
+written — this refusal is distinct from, and takes priority over, "session … is not registered".
+
+#### Scenario: A board write inside a single matching subagent call is attributed to it
+- **WHEN** a subagent's `Bash` call running a board write for a task is open — its pre-tool call
+  recorded, no post-tool yet — and it is the only pending call in its session naming that task
+  and that write's subcommand
+- **THEN** the write's event carries that agent's identifier and its agent type
+
+#### Scenario: A main-thread call stays attributed to the bare session
+- **WHEN** the main thread, not a subagent, makes the same board write, with its own pre-tool
+  call recorded and no agent identifier
+- **THEN** the write's event carries the session alone, with no agent identifier
+
+#### Scenario: Two open matching calls stay attributed to the bare session
+- **WHEN** two subagents' `Bash` calls in the same session are both open and both name the same
+  task and the same write's subcommand
+- **THEN** the write's event carries the session alone, with no agent identifier
+
+#### Scenario: A post-tool call clears its pending call
+- **WHEN** a subagent's `Bash` call naming a task and a write's subcommand completes and its
+  post-tool hook fires, and the same board write is made again afterward
+- **THEN** the write's event carries the session alone, with no agent identifier, because the
+  pending call no longer exists
+
+#### Scenario: A session identifier cannot express an agent identity
+- **WHEN** `--session` or `RATCHET_SESSION_ID` is given a value containing `/`
+- **THEN** the command is refused, naming that a session identifier cannot contain `/` — not the
+  generic "is not registered" refusal — and nothing is written
 
 ### Requirement: Derived session state
 The state of a session SHALL be derived, never stored: ended when it has an end; otherwise

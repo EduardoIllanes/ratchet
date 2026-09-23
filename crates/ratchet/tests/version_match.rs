@@ -1,6 +1,7 @@
-//! `.claude-plugin/plugin.json` carries the same version as the crate. `Cargo.toml` is the
+//! `.claude-plugin/binary-version` pins the same version as the crate. `Cargo.toml` is the
 //! source of truth (spec §10 D-release-assets); the release workflow refuses a tag that does
-//! not match both.
+//! not match both. `plugin.json` deliberately carries no version: Claude Code then tracks the
+//! marketplace commit, so agents and skills update without a binary release.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,18 +19,27 @@ fn cargo_version() -> String {
     doc["package"]["version"].as_str().unwrap().to_string()
 }
 
-fn plugin_version() -> String {
-    let text = fs::read_to_string(repo_root().join(".claude-plugin/plugin.json")).unwrap();
-    let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
-    doc["version"].as_str().unwrap().to_string()
+fn pinned_binary_version() -> String {
+    let text = fs::read_to_string(repo_root().join(".claude-plugin/binary-version")).unwrap();
+    text.trim().to_string()
 }
 
 #[test]
-fn plugin_json_version_matches_cargo_toml() {
+fn binary_version_file_matches_cargo_toml() {
     assert_eq!(
-        plugin_version(),
+        pinned_binary_version(),
         cargo_version(),
-        "plugin.json and Cargo.toml disagree on the version; Cargo.toml is the source of truth"
+        "binary-version and Cargo.toml disagree; Cargo.toml is the source of truth"
+    );
+}
+
+#[test]
+fn plugin_json_carries_no_version() {
+    let text = fs::read_to_string(repo_root().join(".claude-plugin/plugin.json")).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        doc.get("version").is_none(),
+        "plugin.json must not pin a version: it would stop Claude Code from picking up agent and skill changes until the next release"
     );
 }
 

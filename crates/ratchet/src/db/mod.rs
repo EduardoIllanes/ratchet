@@ -86,10 +86,16 @@ pub fn selftest() -> Result<String, DbError> {
 
 /// Ordered, embedded migrations: (version, name, SQL). Never reorder or rewrite an applied one;
 /// add a new pair instead.
-pub const MIGRATIONS: &[(i64, &str, &str)] =
-    &[(1, "0001_init", include_str!("migrations/0001_init.sql"))];
+pub const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (1, "0001_init", include_str!("migrations/0001_init.sql")),
+    (
+        2,
+        "0002_subagent_attribution",
+        include_str!("migrations/0002_subagent_attribution.sql"),
+    ),
+];
 
-pub const LATEST_VERSION: i64 = 1;
+pub const LATEST_VERSION: i64 = 2;
 
 /// Version of the schema in `conn`; 0 when nothing has ever been applied.
 pub fn current_version(conn: &Connection) -> i64 {
@@ -205,7 +211,14 @@ mod tests {
     fn migrate_creates_every_table_the_services_need() {
         let mut conn = open_memory().unwrap();
         migrate(&mut conn).unwrap();
-        for table in ["tasks", "checklist_items", "sessions", "events", "task_seq"] {
+        for table in [
+            "tasks",
+            "checklist_items",
+            "sessions",
+            "events",
+            "task_seq",
+            "pending_calls",
+        ] {
             let n: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -233,7 +246,7 @@ mod tests {
                 err,
                 DbError::Stale {
                     found: 0,
-                    expected: 1
+                    expected: 2
                 }
             ),
             "{err:?}"
@@ -250,7 +263,7 @@ mod tests {
                 err,
                 DbError::Stale {
                     found: 0,
-                    expected: 1
+                    expected: 2
                 }
             ),
             "{err:?}"

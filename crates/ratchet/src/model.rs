@@ -75,6 +75,8 @@ db_enum!(EventKind, Note, {
     SessionPrompt => "session.prompt",
     SessionStop => "session.stop",
     SessionEnd => "session.end",
+    SubagentStart => "subagent.start",
+    SubagentStop => "subagent.stop",
     TaskCreated => "task.created",
     TaskClaimed => "task.claimed",
     TaskStatus => "task.status",
@@ -84,6 +86,8 @@ db_enum!(EventKind, Note, {
     ChecklistUndone => "checklist.undone",
     Handoff => "handoff",
     Note => "note",
+    ReviewVerdict => "review.verdict",
+    GuardrailMainTreeWrite => "guardrail.main_tree_write",
 });
 
 // Consumed by services::sessions (Task 7) and cli::session_cmd (Task 11).
@@ -132,6 +136,9 @@ pub struct Event {
     pub id: i64,
     pub ts: DateTime<Utc>,
     pub session_id: Option<String>,
+    /// The subagent this event is attributed to, alongside `session_id` — `None` for the bare
+    /// session, exactly as every event before T-0016's pairing existed (migration 0002).
+    pub agent_id: Option<String>,
     pub task_id: Option<String>,
     pub kind: String,
     pub payload: Value,
@@ -149,6 +156,7 @@ impl Event {
             id: row.get("id")?,
             ts: clock::parse(&ts).unwrap_or(epoch),
             session_id: row.get("session_id")?,
+            agent_id: row.get("agent_id")?,
             task_id: row.get("task_id")?,
             kind: row.get("kind")?,
             payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
@@ -308,6 +316,11 @@ mod tests {
         assert_eq!(EventKind::ChecklistDone.as_str(), "checklist.done");
         assert_eq!(EventKind::ChecklistUndone.as_str(), "checklist.undone");
         assert_eq!(EventKind::Handoff.as_str(), "handoff");
+        assert_eq!(EventKind::ReviewVerdict.as_str(), "review.verdict");
+        assert_eq!(
+            EventKind::GuardrailMainTreeWrite.as_str(),
+            "guardrail.main_tree_write"
+        );
         assert_eq!(
             EventKind::from_db("checklist.done"),
             EventKind::ChecklistDone

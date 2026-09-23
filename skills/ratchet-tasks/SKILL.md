@@ -14,21 +14,37 @@ through the `ratchet` CLI (the plugin puts it on your path; `ratchet --help` lis
 1. **Look before you claim**: `ratchet task list` is the repo's board (`--mine`, `--status ready`,
    `--tag <t>`); `ratchet task show T-0042` gives one task's body, checklist, last handoff and
    last ten events.
-2. **Claim**: `ratchet task claim T-0042`. It becomes `in_progress` under your session. If another
-   live session holds it, the CLI says so: do not force it, pick another or tell the owner.
-3. **Advance by checklist**: each criterion met → `ratchet task check T-0042 <n>`. Progress is
-   *only* that; there is no "about 60 % done".
-4. **Leave a trail**: `ratchet task note T-0042 "found X, decided Y"` whenever you take a decision
-   the next person needs. If you are stuck: `ratchet task status T-0042 blocked --why "…"`.
+2. **Claim**: `ratchet task claim T-0042`. One call already leaves it `in_progress` under your
+   session (through `ready` first if it was in `backlog`) — no separate `status` call needed. If
+   another live session holds it, the CLI says so: do not force it, pick another or tell the owner.
+3. **Advance by checklist**: `ratchet task check T-0042 1 2 3` marks several items done in one
+   call, in order — a bad number refuses the whole call before marking anything, so it is always
+   safe to batch every criterion you just met. Progress is *only* that; there is no "about 60 %
+   done".
+4. **Leave a trail**: `ratchet task note T-0042 "found X" "decided Y"` whenever you take a
+   decision the next person needs — one call, several notes, each its own event. If you are
+   stuck: `ratchet task status T-0042 blocked --why "…"`.
 5. **Before ending your reply**: if the task is still `in_progress` and you recorded nothing this
    turn, the Stop hook will ask for a handoff once. Write a good one (below).
-6. **Close**: `ratchet task status T-0042 review` (or `done` when the checklist is complete;
-   without a checklist, `done --why "…"`).
+6. **Close in one call**: `ratchet task handoff T-0042 "…" --status review` records the handoff
+   and moves the task in the same call (or `--status done` when the checklist is complete;
+   without a checklist, add `--why "…"`). `done` refuses without an independent review verdict —
+   either a different session that ratchet itself registered, or a reviewer subagent dispatched
+   inside the holding session, must first run `ratchet task review T-0042 approve "…"`. A reviewer
+   subagent's own `Bash` call running that command is what gets it attributed automatically (no
+   flag involved); before `done`, ratchet also confirms that subagent's own Claude Code transcript
+   really contains the `task review T-0042` call it is credited with. A hand-typed `--session <id>`
+   that never opened as a real Claude Code session in this repo can still record the verdict, but
+   it will not satisfy the gate — that is what stops a session from minting an arbitrary
+   `--session`, or a crafted command, to approve its own work. The owner alone bypasses this with
+   `--unreviewed`. A refused transition still leaves the handoff recorded, so this is always safe
+   to try.
 
 ## A useful handoff
 
-`ratchet task handoff T-0042 "…"` is the first thing the next session reads (you tomorrow, or
-another agent). In 2-5 lines it answers:
+`ratchet task handoff T-0042 "…"` (optionally with `--status <state>`, `--why "…"` and
+`--unreviewed`, applying the same rules as `task status`) is the first thing the next session
+reads (you tomorrow, or another agent). In 2-5 lines it answers:
 
 - **What is left**, concretely: "edge-case test in `x.py` missing; 3/5 of the checklist".
 - **Where the work is**: branch/worktree, files touched, whether there is a commit.
@@ -57,6 +73,13 @@ the briefing); it is accepted anywhere on the command line, `ratchet --session <
 T-0042` and `ratchet task claim T-0042 --session <id>` alike. A `claim` with no session fails
 outright; a `note`, `check`, `status` or `handoff` is recorded with no session and warns once, so
 never ignore that warning — an unattributed record is a record nobody can be asked about.
+`--session`/`RATCHET_SESSION_ID` can never contain `/` — that shape is reserved, refused outright,
+because it is the one thing a session identifier cannot forge: a subagent's own identity, which
+only ever comes from the harness telling a pre-tool hook who is making the call, never from a
+string on the command line. A board write made from inside a subagent's own `Bash` call — the
+same session, a real `agent_id` — is attributed to that subagent automatically; `ratchet task
+show` then names the agent type and the first eight characters of its id alongside the session on
+that event.
 
 ## Guardrails
 

@@ -5,7 +5,9 @@
 mod agent_protocol;
 mod board;
 mod bootstrap;
+mod map;
 mod pdf;
 mod sessions;
 mod support;
 mod tasks;
+mod usage;

@@ -169,6 +169,36 @@ pub fn write(file_path: &Path, content: &str, cwd: &Path) -> Value {
     json!({ "tool_name": "Write", "tool_input": { "file_path": file_path.to_string_lossy(), "content": content }, "cwd": cwd.to_string_lossy() })
 }
 
+/// Turns a `bash`/`powershell` pre-tool payload into its matching PostToolUse payload: same
+/// `tool_name`, `tool_input` and `cwd`, plus an empty `tool_response`.
+pub fn post_tool(payload: &Value) -> Value {
+    let mut v = payload.clone();
+    v.as_object_mut()
+        .unwrap()
+        .insert("tool_response".to_string(), json!({}));
+    v
+}
+
+/// A `Read` call with no window (no `offset`, no `limit`).
+pub fn read(file_path: &Path, cwd: &Path) -> Value {
+    json!({ "tool_name": "Read", "tool_input": { "file_path": file_path.to_string_lossy() }, "cwd": cwd.to_string_lossy() })
+}
+
+/// A `Read` call with an explicit window. Either bound may be omitted (`None`); the
+/// corresponding key is left out of `tool_input` rather than sent as `null`, matching what
+/// Claude Code itself sends.
+pub fn read_window(file_path: &Path, offset: Option<i64>, limit: Option<i64>, cwd: &Path) -> Value {
+    let mut input = serde_json::Map::new();
+    input.insert("file_path".to_string(), json!(file_path.to_string_lossy()));
+    if let Some(o) = offset {
+        input.insert("offset".to_string(), json!(o));
+    }
+    if let Some(l) = limit {
+        input.insert("limit".to_string(), json!(l));
+    }
+    json!({ "tool_name": "Read", "tool_input": Value::Object(input), "cwd": cwd.to_string_lossy() })
+}
+
 pub fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).to_string()
 }
@@ -223,6 +253,16 @@ pub fn session_payload(session_id: &str, cwd: &Path) -> Value {
 /// The linked worktree the sandbox creates.
 pub fn worktree(sb: &Sandbox) -> PathBuf {
     sb.root().join(".worktrees").join("wt")
+}
+
+/// Adds `rel` as a newly tracked (committed) file in `sb`'s main tree, so a test can exercise a
+/// guardrail shape against a tracked path other than the fixture's default `tracked.txt`.
+pub fn track_file(sb: &Sandbox, rel: &str, body: &str) -> PathBuf {
+    let p = sb.write(rel, body);
+    let root = sb.root();
+    git(&root, &["add", rel]);
+    git(&root, &["commit", "-q", "-m", &format!("track {rel}")]);
+    p
 }
 
 /// Key the binary stores in `repo_root`: the main root, absolute and lower-cased.
@@ -649,6 +689,22 @@ pub fn payloads_of(sb: &Sandbox, task_id: &str, kind: &str) -> Vec<String> {
     rows.map(|r| r.unwrap()).collect()
 }
 
+/// Raw payloads of a session's events of one kind, oldest first (mirrors `payloads_of`, which
+/// is keyed by task instead of session — used for events, like a guardrail record, that belong
+/// to a session rather than a task).
+pub fn session_event_payloads(sb: &Sandbox, session_id: &str, kind: &str) -> Vec<String> {
+    let conn = db(sb);
+    let mut stmt = conn
+        .prepare("SELECT payload FROM events WHERE session_id = ?1 AND kind = ?2 ORDER BY id")
+        .unwrap();
+    let rows = stmt
+        .query_map(rusqlite::params![session_id, kind], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap();
+    rows.map(|r| r.unwrap()).collect()
+}
+
 /// `(status, claimed_by, archived_at)` straight from the row.
 pub fn task_state(sb: &Sandbox, task_id: &str) -> (String, Option<String>, Option<String>) {
     db(sb)
@@ -676,4 +732,434 @@ pub fn lines(out: &Output) -> Vec<String> {
         .filter(|l| !l.trim().is_empty())
         .map(str::to_string)
         .collect()
+}
+
+// --- group 6: map ----------------------------------------------------------------------------
+
+/// Run `ratchet map <args>` against the sandbox, from its root.
+pub fn map(sb: &Sandbox, args: &[&str]) -> Output {
+    Command::new(ratchet_bin())
+        .arg("map")
+        .args(args)
+        .current_dir(sb.root())
+        .env("RATCHET_HOME", sb.home.path())
+        .env_remove("RATCHET_SESSION_ID")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap()
+}
+
+/// Like `map`, but with extra environment (`RATCHET_NOW`, mainly).
+pub fn map_env(sb: &Sandbox, args: &[&str], extra: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(ratchet_bin());
+    cmd.arg("map")
+        .args(args)
+        .current_dir(sb.root())
+        .env("RATCHET_HOME", sb.home.path())
+        .env_remove("RATCHET_SESSION_ID")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    cmd.output().unwrap()
+}
+
+/// Writes a `.rs` file with a `//!` doc-comment header (or none, when `header` is `None`) and a
+/// short body — enough to be a plausible Rust module without needing real code.
+pub fn write_rust_module(sb: &Sandbox, rel: &str, header: Option<&str>, body: &str) -> PathBuf {
+    let text = match header {
+        Some(h) => format!("//! {h}\n\n{body}\n"),
+        None => format!("{body}\n"),
+    };
+    sb.write(rel, &text)
+}
+
+/// Writes a `.py` file with a triple-quoted module docstring (or none).
+pub fn write_python_module(sb: &Sandbox, rel: &str, header: Option<&str>, body: &str) -> PathBuf {
+    let text = match header {
+        Some(h) => format!("\"\"\"{h}\"\"\"\n\n{body}\n"),
+        None => format!("{body}\n"),
+    };
+    sb.write(rel, &text)
+}
+
+/// Writes a `.ts` file with a `/** … */` leading block comment (or none).
+pub fn write_ts_module(sb: &Sandbox, rel: &str, header: Option<&str>, body: &str) -> PathBuf {
+    let text = match header {
+        Some(h) => format!("/**\n * {h}\n */\n\n{body}\n"),
+        None => format!("{body}\n"),
+    };
+    sb.write(rel, &text)
+}
+
+/// Writes a file with no recognised header at all — any extension, any content.
+pub fn write_plain_file(sb: &Sandbox, rel: &str, body: &str) -> PathBuf {
+    sb.write(rel, body)
+}
+
+/// `git add <files> && git commit -m <msg>` in the sandbox's repo — the only way a fixture file
+/// becomes visible to `git ls-files`, which is what `ratchet map` actually reads.
+pub fn commit(sb: &Sandbox, files: &[&str], msg: &str) {
+    let root = sb.repo.path();
+    let mut args = vec!["add"];
+    args.extend_from_slice(files);
+    git(root, &args);
+    git(root, &["commit", "-q", "-m", msg]);
+}
+
+/// `HEAD`'s full sha, from the sandbox's repo.
+#[allow(dead_code)] // kept for later map tasks; no scenario calls it yet
+pub fn head_sha(sb: &Sandbox) -> String {
+    let out = Command::new("git")
+        .args(["-C", &sb.repo.path().to_string_lossy(), "rev-parse", "HEAD"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The written map's text, or empty when absent.
+pub fn read_map(sb: &Sandbox) -> String {
+    fs::read_to_string(sb.root().join(".ratchet/map.md")).unwrap_or_default()
+}
+
+/// `.ratchet/map.notes`'s text, or empty when absent.
+pub fn read_notes(sb: &Sandbox) -> String {
+    fs::read_to_string(sb.root().join(".ratchet/map.notes")).unwrap_or_default()
+}
+
+/// Replaces `CLAUDE.md` at the sandbox root with a symlink to `target` — used only by the
+/// `--wire` refusal scenario. Unix-only (`cfg(unix)`), matching every other symlink-dependent
+/// test convention in this repo (there are none yet outside this one; keep it gated the same way
+/// the rest of the suite gates anything OS-specific).
+#[cfg(unix)]
+pub fn symlink_claude_md(sb: &Sandbox, target: &Path) {
+    use std::os::unix::fs::symlink;
+    let link = sb.root().join("CLAUDE.md");
+    let _ = fs::remove_file(&link);
+    symlink(target, &link).unwrap();
+}
+
+/// Run `ratchet map <args>` with no sandbox at all — for the "outside a marker repo" scenarios,
+/// where `dir` deliberately has no `ratchet.toml` above it (`unmanaged_dir()`).
+pub fn map_at(dir: &Path, home: &Path, args: &[&str]) -> Output {
+    Command::new(ratchet_bin())
+        .arg("map")
+        .args(args)
+        .current_dir(dir)
+        .env("RATCHET_HOME", home)
+        .env_remove("RATCHET_SESSION_ID")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap()
+}
+
+// --- group 7: usage --------------------------------------------------------------------------
+//
+// `TranscriptBuilder` writes JSONL transcripts under a temp "projects" root, matching exactly
+// the fields design §2 (`docs/superpowers/specs/2026-09-21-ratchet-usage-design.md`) verified on
+// real Claude Code output: `type`, `timestamp`, `sessionId`, `cwd`, `gitBranch`, `version`,
+// `message.model`, `message.usage.{input_tokens,cache_creation_input_tokens,
+// cache_read_input_tokens,output_tokens,output_tokens_details.thinking_tokens}`,
+// `message.content` holding `tool_use` blocks with `id`/`name`. Point `RATCHET_CLAUDE_PROJECTS`
+// at `.root` (see `usage()` below). Every record uses a fixed `version` ("1.2.3") and
+// `gitBranch` ("main") — no scenario in this plan needs either to vary; a scenario that does can
+// still reach into `.root` directly and write its own record.
+
+/// Four token classes plus optional thinking, in the units the fixture's callers already think
+/// in (plain `u64`, not yet abbreviated — that only happens on the way to a terminal).
+pub struct Usage {
+    pub input: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+    pub output: u64,
+    pub thinking: Option<u64>,
+}
+
+// NOTE (Task 1 tension, flagged for the owner): the brief's verbatim code names both this
+// token-tuple builder and the `ratchet usage` process runner below `usage`, which cannot coexist
+// in one module (E0428, no overloading in Rust). Renamed this one -- the smaller, purely-local
+// convenience -- to `tokens`, keeping `usage(sb, tb, args, cwd, extra)` as `usage` since it is
+// the helper named in its own doc comment ("Run `ratchet usage <args>` ... every `usage__*`
+// scenario test goes through this helper") and matches the subcommand name it drives.
+pub fn tokens(input: u64, cache_write: u64, cache_read: u64, output: u64) -> Usage {
+    Usage {
+        input,
+        cache_write,
+        cache_read,
+        output,
+        thinking: None,
+    }
+}
+
+pub struct TranscriptBuilder {
+    pub root: TempDir,
+}
+
+impl TranscriptBuilder {
+    pub fn new() -> Self {
+        TranscriptBuilder {
+            root: TempDir::new().unwrap(),
+        }
+    }
+
+    fn slug(cwd: &Path) -> String {
+        cwd.to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
+    }
+
+    fn transcript_path(&self, cwd: &Path, session_id: &str) -> PathBuf {
+        self.root
+            .path()
+            .join(Self::slug(cwd))
+            .join(format!("{session_id}.jsonl"))
+    }
+
+    fn subagents_dir(&self, cwd: &Path, session_id: &str) -> PathBuf {
+        self.root
+            .path()
+            .join(Self::slug(cwd))
+            .join(session_id)
+            .join("subagents")
+    }
+
+    fn append(path: &Path, record: &Value) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(f, "{record}").unwrap();
+    }
+
+    fn append_raw(path: &Path, line: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
+    fn record(
+        ts: &str,
+        session_id: &str,
+        cwd: &Path,
+        model: &str,
+        u: &Usage,
+        content: Value,
+    ) -> Value {
+        let mut message = json!({ "model": model, "content": content });
+        message["usage"] = json!({
+            "input_tokens": u.input,
+            "cache_creation_input_tokens": u.cache_write,
+            "cache_read_input_tokens": u.cache_read,
+            "output_tokens": u.output,
+        });
+        if let Some(t) = u.thinking {
+            message["usage"]["output_tokens_details"] = json!({ "thinking_tokens": t });
+        }
+        json!({
+            "type": "assistant",
+            "timestamp": ts,
+            "sessionId": session_id,
+            "cwd": cwd.to_string_lossy(),
+            "gitBranch": "main",
+            "version": "1.2.3",
+            "message": message,
+        })
+    }
+
+    /// One assistant call, no `tool_use` blocks.
+    pub fn call(&self, cwd: &Path, session_id: &str, ts: &str, model: &str, u: &Usage) -> &Self {
+        let rec = Self::record(ts, session_id, cwd, model, u, json!([]));
+        Self::append(&self.transcript_path(cwd, session_id), &rec);
+        self
+    }
+
+    /// One assistant call whose content includes one `tool_use` block — used for an `Agent`
+    /// dispatch (ends orientation, and its `id` is what a subagent's `toolUseId` matches) and for
+    /// `Edit`/`Write`/`NotebookEdit` (also ends orientation, no `toolUseId` match needed).
+    #[allow(clippy::too_many_arguments)] // fixture builder, one field per transcript column
+    pub fn call_with_tool(
+        &self,
+        cwd: &Path,
+        session_id: &str,
+        ts: &str,
+        model: &str,
+        u: &Usage,
+        tool_name: &str,
+        tool_use_id: &str,
+    ) -> &Self {
+        let content = json!([{ "type": "tool_use", "id": tool_use_id, "name": tool_name }]);
+        let rec = Self::record(ts, session_id, cwd, model, u, content);
+        Self::append(&self.transcript_path(cwd, session_id), &rec);
+        self
+    }
+
+    /// An assistant record with no `message.usage` key at all — R2's "partial" case.
+    pub fn call_no_usage(&self, cwd: &Path, session_id: &str, ts: &str, model: &str) -> &Self {
+        let rec = json!({
+            "type": "assistant",
+            "timestamp": ts,
+            "sessionId": session_id,
+            "cwd": cwd.to_string_lossy(),
+            "gitBranch": "main",
+            "version": "1.2.3",
+            "message": { "model": model, "content": [] },
+        });
+        Self::append(&self.transcript_path(cwd, session_id), &rec);
+        self
+    }
+
+    /// A line that is not valid JSON — R2's "skipped" case.
+    pub fn garbage(&self, cwd: &Path, session_id: &str) -> &Self {
+        Self::append_raw(
+            &self.transcript_path(cwd, session_id),
+            "not json at all {{{",
+        );
+        self
+    }
+
+    /// A well-formed record whose `type` is not `"assistant"` — ignored, never counted anywhere.
+    pub fn non_assistant(&self, cwd: &Path, session_id: &str) -> &Self {
+        let rec = json!({ "type": "user", "timestamp": "2026-01-01T00:00:00Z" });
+        Self::append(&self.transcript_path(cwd, session_id), &rec);
+        self
+    }
+
+    /// One call in a subagent's own transcript,
+    /// `<slug>/<session_id>/subagents/agent-<agent_id>.jsonl`.
+    pub fn subagent(
+        &self,
+        cwd: &Path,
+        session_id: &str,
+        agent_id: &str,
+        ts: &str,
+        model: &str,
+        u: &Usage,
+    ) -> &Self {
+        let rec = Self::record(ts, session_id, cwd, model, u, json!([]));
+        let path = self
+            .subagents_dir(cwd, session_id)
+            .join(format!("agent-{agent_id}.jsonl"));
+        Self::append(&path, &rec);
+        self
+    }
+
+    /// `agent-<agent_id>.meta.json` next to that subagent transcript.
+    #[allow(clippy::too_many_arguments)] // fixture builder, one field per meta-file column
+    pub fn meta(
+        &self,
+        cwd: &Path,
+        session_id: &str,
+        agent_id: &str,
+        agent_type: &str,
+        description: &str,
+        model: &str,
+        tool_use_id: Option<&str>,
+    ) -> &Self {
+        let mut m = json!({ "agentType": agent_type, "description": description, "model": model });
+        if let Some(id) = tool_use_id {
+            m["toolUseId"] = json!(id);
+        }
+        let path = self
+            .subagents_dir(cwd, session_id)
+            .join(format!("agent-{agent_id}.meta.json"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, m.to_string()).unwrap();
+        self
+    }
+}
+
+/// Run `ratchet usage <args>` against the sandbox, with `RATCHET_CLAUDE_PROJECTS` pointed at the
+/// fixture builder's root. Every `usage__*` scenario test goes through this helper.
+pub fn usage(
+    sb: &Sandbox,
+    tb: &TranscriptBuilder,
+    args: &[&str],
+    cwd: &Path,
+    extra: &[(&str, &str)],
+) -> Output {
+    let mut cmd = Command::new(ratchet_bin());
+    cmd.arg("usage")
+        .args(args)
+        .current_dir(cwd)
+        .env("RATCHET_HOME", sb.home.path())
+        .env("RATCHET_CLAUDE_PROJECTS", tb.root.path())
+        .env_remove("RATCHET_SESSION_ID")
+        .env_remove("RATCHET_NOW")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    cmd.output().unwrap()
+}
+
+/// Inserts a `subagent.start`/`subagent.stop` row directly, bypassing the CLI — the exact shape
+/// group T-0006 ships (see Assumption 1): the row's `task_id` column carries the task; the
+/// payload carries `agent_id`, `agent_type`, `description` only.
+#[allow(clippy::too_many_arguments)] // fixture builder, one field per event-row column
+pub fn seed_subagent_event(
+    sb: &Sandbox,
+    kind: &str,
+    session_id: &str,
+    agent_id: &str,
+    agent_type: &str,
+    description: &str,
+    task_id: &str,
+    ts: &str,
+) {
+    let conn = db(sb);
+    conn.execute(
+        "INSERT INTO events(ts, session_id, task_id, kind, payload, source) VALUES (?1,?2,?3,?4,?5,'hook')",
+        rusqlite::params![
+            ts,
+            session_id,
+            task_id,
+            kind,
+            json!({
+                "agent_id": agent_id,
+                "agent_type": agent_type,
+                "description": description,
+            })
+            .to_string(),
+        ],
+    )
+    .unwrap();
+}
+
+/// True if `text` contains `n` as a standalone number: the byte immediately before and after
+/// every match is not an ASCII digit, `.` or `,` — so `contains_number(text, "40")` cannot be
+/// satisfied by "140", "40.5", "1,400" or "2400". Every scenario that checks a specific total
+/// uses this instead of `str::contains`, so an aggregate that is merely a superstring of the
+/// right digits does not pass (fix round 1, finding 1/4).
+pub fn contains_number(text: &str, n: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut start = 0usize;
+    while let Some(rel) = text[start..].find(n) {
+        let idx = start + rel;
+        let before_ok = idx == 0 || !matches!(bytes[idx - 1], b'0'..=b'9' | b'.' | b',');
+        let end = idx + n.len();
+        let after_ok = end >= bytes.len() || !matches!(bytes[end], b'0'..=b'9' | b'.' | b',');
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
 }

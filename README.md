@@ -20,8 +20,8 @@ reviewer). Everything is enforced by hooks and one small binary, not by prompt t
   handoff, orphaned tasks, and up to five ready to take. One line per prompt after that.
 - **Local PDF extraction** (`ratchet pdf`) through the `liteparse` CLI, with automatic OCR
   retry and output kept out of the terminal.
-- **Agent roles, skills and commands.** Five agent profiles, the `ratchet-tasks` and
-  `ratchet-pdf` skills, the OpenSpec skills with their `/opsx:*` commands, and `/ratchet:init`.
+- **Agent roles, skills and commands.** Seven agent profiles, the `ratchet-tasks` and
+  `ratchet-pdf` skills, the `/opsx:*` OpenSpec commands, `/ratchet:init` and `/ratchet:map`.
 
 Cost of the hot path: the guardrail hook does 11-13 ms of its own work per tool call (see
 *Latency* at the end).
@@ -32,10 +32,15 @@ Cost of the hot path: the guardrail hook does 11-13 ms of its own work per tool 
     claude plugin install ratchet@ratchet
 
 That is all. The first time a hook runs it downloads the prebuilt `ratchet` binary for your
-platform (macOS arm64/x64, Linux x64, Windows x64) from the release matching the plugin
-version, verifies its SHA-256 against the release's `SHA256SUMS.txt`, and puts it in the
-plugin's `bin/`. No Rust, no PATH changes, nothing installed anywhere else. Updating the plugin
-repeats this for the new version.
+platform (macOS arm64/x64, Linux x64, Windows x64) from the release pinned in
+`.claude-plugin/binary-version`, verifies its SHA-256 against the release's `SHA256SUMS.txt`,
+and puts it in the plugin's `bin/`. No Rust, no PATH changes, nothing installed anywhere else.
+
+The plugin manifest carries no version on purpose: Claude Code tracks the marketplace commit,
+so `claude plugin update ratchet@ratchet` picks up every change to agents, skills and hooks
+without waiting for a binary release. Each update lands in a fresh plugin dir, and the first
+hook there downloads the pinned binary again (a few MB). A new binary ships as a tagged release
+that bumps `Cargo.toml` and `binary-version` together.
 
 Then opt a repo in. Open a Claude Code session at its root and run:
 
@@ -46,7 +51,7 @@ Code adds that directory to the PATH of its own sessions. So every `ratchet ...`
 README runs inside a session, either through the `!` prefix (`! ratchet task list`) or by
 letting the agent run it. To use it from a terminal, put that `bin/` on your PATH or link the
 binary, for example `ln -s "<plugin dir>/bin/ratchet" ~/.local/bin/ratchet`; the link breaks
-when the plugin updates to a new version, because the plugin dir contains the version.
+on every plugin update, because the plugin dir is named after the marketplace commit.
 
 If the download cannot happen (offline, unsupported platform, checksum mismatch), the hook
 prints one line and exits 0; the session is not affected, and the hooks stay quiet for an hour
@@ -119,7 +124,7 @@ Without that file, every hook is a no-op.
 ## Guardrails
 
 
-Built-in: `python-venv`, `git-destructive`, `env-files`, `main-tree`. Disable per repo with
+Built-in: `python-venv`, `git-destructive`, `env-files`, `main-tree`, `big-read`. Disable per repo with
 `[guardrails] off = ["id"]`. Add your own with the same schema, machine-wide in
 `~/.ratchet/config.toml` → `[guardrails] extra = "guardrails.toml"`, or per repo in
 `ratchet.toml` → `[guardrails] extra = "ratchet/guardrails.toml"`. A rule with an existing id
@@ -134,9 +139,36 @@ write-method names of your own driver in the pattern):
     message = "The database is read-only for agents."
     alternative = "Read through the data layer; if a write is really needed, the owner does it by hand."
 
+A one-off command rule can also live right in `ratchet.toml`, without a separate file —
+`match` is a regex over each command segment, and the `message` must itself state the
+alternative (say "use" or "instead") or the file is refused on load:
+
+    [[guardrails.rules]]
+    name = "no-curl"
+    match = '^\s*curl\b'
+    message = "Use the repo's fetch script instead."
+
+Inline rules are always command-only, so `name` must not equal a built-in id (`python-venv`,
+`git-destructive`, `env-files`, `main-tree`, `big-read`) — that would silently replace a
+non-command built-in with one that can never match. Reusing an id, or giving an explicit empty
+`tools = []`, is refused on load naming the rule and the alternative (rename it, or disable the
+built-in with `off = [...]`).
+
 Known behaviour, by design: command rules split on `;` only outside quotes, so a quoted
 `"done; mypy clean"` does not trip `python-venv`; but a `content` rule scans what will be
 written, so quoting a blocked pattern in documentation blocks that write too.
+
+`big-read` keeps a whole big file out of the orchestrator's own context: a `Read` with no
+`offset`/`limit`, or a bare `cat`/`head`/`tail`/`less`/`more`, over a regular file of more than
+`[guardrails] big_read_lines` lines (default 350) is blocked, naming three ways out — `Read`
+with a window, `grep` for the lines wanted, or the `reader` agent (`haiku`, low effort) with the
+file and a question. It exempts a file under the repo's worktrees directory (that is where
+implementers read whole files on purpose), a file that does not exist, and a piped command
+(`cat big.rs | grep fn` already filters before anything reaches the transcript). Override the
+threshold per repo:
+
+    [guardrails]
+    big_read_lines = 800
 
 ## The board
 
@@ -147,12 +179,18 @@ Work lives in tasks, and a task moves only in ways you can check afterwards.
     ratchet task list --mine --status in_progress
     ratchet task show T-0042                # body, checklist, last handoff, last ten events
     ratchet task new "Port the parser" -c "tests green" -c "docs updated"
-    ratchet task claim T-0042               # takes it for your session
-    ratchet task check T-0042 1             # one acceptance criterion met
-    ratchet task note T-0042 "found X, decided Y"
-    ratchet task handoff T-0042 "what is left and how to resume"
-    ratchet task status T-0042 review       # or done, when the checklist is complete
+    ratchet task claim T-0042               # one call: takes it, already in_progress
+    ratchet task check T-0042 1 2           # one or more criteria met, in order, in one call
+    ratchet task note T-0042 "found X" "decided Y"    # one or more notes, in one call
+    ratchet task handoff T-0042 "what is left and how to resume" --status review
     ratchet task archive T-0042             # a reviewed done task leaves the board
+
+`claim` puts a task in `in_progress` in the same call (through `ready` first if it was in
+`backlog`). `check` and `note` each take one or more values and apply them in order, one event
+per value; a bad checklist number in a `check` call refuses the whole call before marking
+anything. `handoff`'s `--status <state>` applies the same transition `ratchet task status` would
+— including `--why` and the owner's `--unreviewed` — after recording the handoff; a refused
+transition still leaves the handoff recorded.
 
 Identifiers are `T-0001`, `T-0002`, … from a sequence that never reuses a number. A task carries a
 title, a body, a priority from 1 to 4, tags, an optional parent, and the checklist that is its
@@ -174,7 +212,8 @@ Three things the harness does with the board, without being asked:
 - **At session start** it prints a briefing of at most 40 lines: the repo, the session and the
   branch; your tasks in progress with their last handoff; the repo's tasks held by dead sessions,
   with theirs; up to five ready to take; and where the full guide is. A repo with nothing pending
-  gets one line.
+  gets one line. When the repo has an `AGENTS.md` at its root, a second line `rules: AGENTS.md`
+  points at it — the briefing never restates what is in it.
 - **On every prompt**, if you hold a task, one line: `[ratchet] T-0042 in_progress (2/5) · last
   handoff: "…"`.
 - **When the session tries to close** holding a task you recorded nothing about this turn, it is
@@ -183,7 +222,10 @@ Three things the harness does with the board, without being asked:
 
 Any command that would print more than 60 lines writes them to `~/.ratchet/out/<timestamp>-<name>.txt`
 instead and prints the first 20 plus that path. `--json` gives the machine-readable form of any
-board, session or db command; `--session <id>` attributes a write explicitly and is accepted anywhere on the line.
+board, session or db command; `--session <id>` attributes a write explicitly and is accepted anywhere on
+the line, but it can never name a subagent (a value with `/` is refused) — a board write made from
+inside a subagent's own `Bash` call is attributed to that subagent automatically, by matching the
+call against the task id and subcommand, never by a flag.
 
 ## State and sessions
 
@@ -246,13 +288,64 @@ is not planned — it stays in `ops`, where it already runs daily (owner decisio
 
 ## Agents and skills
 
+Eight agent profiles in `agents/`: `analyst`, `spec-test-author`, `implementer`, `reviewer`,
+`refactorer`, `researcher`, `mapper`, `reader` — see `AGENTS.md` for how they are
+meant to be combined. Two skills: `ratchet-tasks` (working the board, writing handoffs) and
+`ratchet-pdf` (extracting text from a local PDF). OpenSpec work is the six `/opsx:*` commands
+(`propose`, `apply`, `update`, `sync`, `archive`, `explore`) in `commands/opsx/`; they need the
+`openspec` CLI installed separately. Ratchet used to also ship the same six workflows a second
+time as `openspec-*` skills — that duplicate set is gone (T-0011); the `/opsx:*` commands carry
+every instruction the skills had. The standalone `openspec` plugin ships this same command set
+under its own name — do not install it alongside `ratchet`, it only doubles the listing every
+agent pays for on every turn.
 
-Five agent profiles in `agents/`: `analyst`, `spec-test-author`, `implementer`, `reviewer`,
-`researcher` — see `docs/agent-doctrine.md` for how they are meant to be combined. Two skills:
-`ratchet-tasks` (working the board, writing handoffs) and `ratchet-pdf` (extracting text from a
-local PDF). The OpenSpec skills (`openspec-propose`, `-apply-change`, `-update-change`,
-`-sync-specs`, `-archive-change`, `-explore`) and the `/opsx:*` commands are included as-is
-and need the `openspec` CLI installed separately.
+## Map
+
+`ratchet map` derives `.ratchet/map.md` — the repo's layout, gate commands, and one sentence per
+source file — from `git ls-files`, file headers and manifests, deterministically, with no model
+involved. `/ratchet:map` runs it and offers to wire it into `CLAUDE.md` (`--wire`, run once,
+never automatic); `/ratchet:map --deep` describes header-less files by dispatching the `mapper`
+agent (`haiku`), which only ever records a sentence through `ratchet map note` — it edits no
+file directly. `ratchet map status` prints the map's freshness (`map: current`, `map: N commits
+behind`, or `map: from another branch`); the session-start briefing shows the same line when the
+map is not current, dropped first if the briefing's own 40-line cap is tight. A map never grows
+past 150 lines — over the cap, the deepest directories collapse into one summary line each.
+`.ratchet/map.md` and `.ratchet/map.notes` are local and untracked; `--wire` is what adds
+`.ratchet/` to `.gitignore`, not `ratchet map` on its own. Configure `[map] exclude` and
+`[map] gate` in `ratchet.toml` when the defaults don't fit a repo.
+
+## Usage
+
+`ratchet usage` reports token cost per task, role and model, read straight from the transcripts
+Claude Code already writes under `~/.claude/projects` (or `RATCHET_CLAUDE_PROJECTS`) and joined
+with the sessions/task events ratchet already records — no extra tracking, nothing to opt into.
+Plain `ratchet usage` lists every task touched in the current repo's window, one line each
+(status, review rounds, abbreviated tokens, title, cost when weights are configured); a trailing
+`skipped N partial N version X` line appears only when the scan actually met something it
+couldn't fully read.
+
+- `ratchet usage <id>` shows one task in detail: tokens per role/model, orientation (the
+  orchestrator's cost before the first claim), tokens per review round, orchestrator share, cache
+  efficiency, and cost.
+- `ratchet usage --by task|role|model|session` aggregates across the whole window instead of
+  listing tasks; `--by role` also adds review rounds per task and orientation per session.
+- `--since 7d|30d|<RFC 3339 date>` widens or narrows the window (default `7d`); `--all-repos`
+  drops the repo filter and reports across every repo ratchet knows about; `--json` prints the
+  same data as JSON (raw, unabbreviated numbers) instead of the terminal text.
+
+Cost is only ever shown when every bucket contributing to a number matched a configured weight.
+Configure weights in the machine config (`~/.ratchet/config.toml`), keyed by model name prefix
+and matched longest-prefix-first, so a more specific prefix overrides a shorter one:
+
+    [usage.weights]
+    "claude-sonnet" = { input = 3.0, cache_write = 3.75, cache_read = 0.3, output = 15.0 }
+    "claude-sonnet-5" = { input = 2.5, cache_write = 3.0, cache_read = 0.25, output = 12.0 }
+
+`ratchet usage <id> --note` is the command's only write: it appends a task note starting with
+`usage:` that holds the same one-task summary paragraph the `<id>` detail view is built from
+(total tokens, rounds, orientation, cost), through the same `services::tasks::note` write
+`ratchet task note` uses — attributed to the same session, refused with the identical message on
+a task that doesn't exist. Without `--note`, `ratchet usage` never writes anything.
 
 ## Build from source
 
@@ -283,7 +376,10 @@ ported is deliberately not planned for `ratchet` — it stays in `ops`.
 
 ## Status
 
-v0.1.1 — groups 0-5 of the design spec are shipped (guardrails, state, task board,
-`ratchet pdf`, content, release). v0.1.1 fixes the hook scripts' missing exec bit, which
-made every hook fail with "Permission denied" on a fresh v0.1.0 install. Design: `docs/superpowers/specs/2026-09-16-ratchet-plugin-design.md`.
-Agent doctrine: `docs/agent-doctrine.md`.
+v0.2.0 — groups 0-7 of the design spec are shipped. New since v0.1.1: `ratchet map`, the
+big-read guardrail, subagent lifecycle on the board, `ratchet usage` (token cost per task, role
+and model), task review verdicts with a done gate that requires an independent approve (attributed
+per subagent, proven by its transcript), batched board commands, repo guardrail rules in
+ratchet.toml where every block names its alternative, and an invalid or unparseable config
+degrading to the built-in rules instead of turning guardrails off. Design: `docs/superpowers/specs/2026-09-16-ratchet-plugin-design.md`.
+Agent doctrine: `AGENTS.md`.

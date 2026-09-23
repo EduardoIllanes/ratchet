@@ -15,8 +15,11 @@ carries the alternative the agent should use instead, so it corrects itself in o
 A repo SHALL opt in to ratchet by having a `ratchet.toml` at its root. Every hook SHALL
 resolve the repo from the working directory of the tool call by walking up to the nearest
 marker; when the working directory is a linked git worktree, the repo root SHALL be the main
-checkout that owns it. Without a marker, every hook SHALL exit 0 immediately without reading
-any other file. An unreadable or invalid marker SHALL be logged and treated as "no marker".
+checkout that owns it. Without a marker — no `ratchet.toml` anywhere above the working
+directory — every hook SHALL exit 0 immediately without reading any other file. A marker that
+exists but cannot be read or parsed SHALL NOT be treated as "no marker": the repo is still
+opted in, logged, and falls back to the built-in rules exactly as *A ratchet.toml or extra
+rules file that fails to parse degrades to built-ins, not fail-open* describes.
 
 #### Scenario: No marker, hooks do nothing
 - **WHEN** the pre-tool hook receives `python scripts/x.py` from a directory with no `ratchet.toml` above it
@@ -26,9 +29,9 @@ any other file. An unreadable or invalid marker SHALL be logged and treated as "
 - **WHEN** the working directory is `src/deep` inside a repo that has `.venv` and `ratchet.toml` at its root and the tool call is `python scripts/x.py`
 - **THEN** the hook blocks with the python-venv rule
 
-#### Scenario: Invalid marker is logged and ignored
-- **WHEN** `ratchet.toml` is not valid TOML and the tool call is `python scripts/x.py`
-- **THEN** the hook exits 0 and the log file contains one line naming `ratchet.toml`
+#### Scenario: Invalid marker is logged and the repo stays opted in
+- **WHEN** `ratchet.toml` is not valid TOML and the tool call is `python scripts/x.py` in a repo with `.venv`
+- **THEN** the hook blocks with rule `python-venv`, and the log file contains one line naming `ratchet.toml`
 
 ### Requirement: Marker can be generated
 `ratchet config init` SHALL write a commented `ratchet.toml` at the root of the git repository
@@ -55,11 +58,65 @@ rule and the alternative, prefixed `[ratchet guardrail:<id>]`: (a) `python`, `pi
 `git checkout -- .`, `git clean -f` and recursive forced deletion, except a deletion whose
 every target is under the session scratchpad; (c) writes to `.env` files; (d) writes to a
 tracked file of the main tree of the repo, from any session, including one running in a
-worktree. Command rules SHALL evaluate each command segment separately, splitting on `;`,
+worktree — whether the write is an `Edit`, `Write`, `NotebookEdit` or `MultiEdit` call, or a
+`Bash`/`PowerShell` command segment of a recognised writing shape whose target is such a file:
+a `>` or `>>` redirection, `tee`, `sed -i`, the destination of `cp`, `mv` or `rsync`, and the
+paths given to `git checkout --` or `git restore`. A command that writes through an
+interpreter (`python`, `node`, `perl`, a heredoc script) is NOT recognised before the fact; it
+is caught after the fact (see *Main-tree writes detected after the fact*). Command rules
+SHALL evaluate each command segment separately, splitting on `;`,
 `&&`, `||`, `|` and newlines only outside quotes. The same rules SHALL apply with the same
 message whether the command arrived through `Bash` or `PowerShell`. Rules SHALL be
 extensible from a machine-wide file and from a repo file with the same schema; a rule with
 the id of an existing one SHALL replace it; a repo SHALL be able to disable a rule by id.
+
+A repo SHALL also be able to declare guardrail rules inline in its own `ratchet.toml`, under
+`[[guardrails.rules]]`, without a separate `extra` file: `name`, `match` (a regex over each
+command segment, the same matcher the built-in command rules use), `message`, and an optional
+`tools` list (default `["Bash", "PowerShell"]`). Because there is no separate `alternative`
+field here, the `message` SHALL itself state the alternative — contain a form of "use" or
+"instead" — and SHALL NOT be empty; either failure, an unknown key, or an explicit empty
+`tools = []`, SHALL be refused on load with an error naming the rule. Inline rules SHALL be
+appended after every built-in and `extra`-file rule, so with an overlapping `match` pattern an
+earlier rule still wins; this is distinct from an inline rule's `name` equalling the id of a
+built-in rule (`python-venv`, `git-destructive`, `env-files`, `main-tree`, `big-read`), which is
+never appended alongside it — inline rules are command-only, so replacing a non-command built-in
+this way would silently disable it, and SHALL instead be refused on load with an error naming
+the rule, its colliding id, and the alternative (choose another name, or disable the built-in
+with `off = [...]`). Otherwise an inline rule SHALL evaluate with the same block/allow semantics
+and the same exit code as any other rule.
+
+#### Scenario: Custom rule declared inline in ratchet.toml blocks
+- **WHEN** `ratchet.toml` declares `[[guardrails.rules]]` with `name = "no-curl"`, `match = '^\s*curl\b'`, `message = "Use the repo's fetch script instead."` and the tool call is `curl https://example.com`
+- **THEN** the hook blocks with rule `no-curl` and that message
+
+#### Scenario: Inline custom rule evaluates after the built-ins
+- **WHEN** the repo also declares an inline `[[guardrails.rules]]` entry named `catch-all-force` whose `match` also matches `git push --force`, and the tool call is `git push --force origin main`
+- **THEN** the hook blocks with the built-in rule `git-destructive`, not `catch-all-force`
+
+#### Scenario: Inline custom rule with an unknown key is refused
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry with a key outside `name`, `match`, `message` and `tools`
+- **THEN** `ratchet guardrails list` exits 1 and stderr names `ratchet.toml`
+
+#### Scenario: Inline custom rule with an empty message is refused
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry whose `message` is empty
+- **THEN** `ratchet guardrails list` exits 1 and stderr names the rule
+
+#### Scenario: Inline custom rule with no stated alternative is refused
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry whose `message` says neither "use" nor "instead"
+- **THEN** `ratchet guardrails list` exits 1 and stderr names the rule
+
+#### Scenario: Inline rule colliding with a builtin id is refused
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry with `name = "env-files"`
+- **THEN** `ratchet guardrails list` exits 1 and stderr names `env-files`, `ratchet.toml`, and the alternative of renaming the rule or disabling the built-in with `off`
+
+#### Scenario: Inline rule colliding with a non-command builtin id is refused
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry with `name = "main-tree"`
+- **THEN** `ratchet guardrails list` exits 1 and stderr names `main-tree`
+
+#### Scenario: Inline custom rule with empty tools is refused
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry with `tools = []`
+- **THEN** `ratchet guardrails list` exits 1 and stderr names the rule
 
 #### Scenario: Python outside the venv
 - **WHEN** the tool call is `python scripts/x.py` through `Bash` in a repo with `.venv`
@@ -101,6 +158,22 @@ the id of an existing one SHALL replace it; a repo SHALL be able to disable a ru
 - **WHEN** a `Write` targets a path in the main tree that git does not track
 - **THEN** the hook allows it
 
+#### Scenario: Bash redirection into a tracked main-tree file blocked
+- **WHEN** the tool call is `echo x > README.md` through `Bash` and the working directory is the main tree, where `README.md` is tracked
+- **THEN** the hook blocks with rule `main-tree` and the same message an `Edit` gets
+
+#### Scenario: Bash writing shapes into the main tree blocked
+- **WHEN** each of `printf y >> src/main.rs`, `tee src/main.rs`, `sed -i '' 's/a/b/' src/main.rs`, `cp /tmp/x src/main.rs`, `mv /tmp/x src/main.rs`, `rsync /tmp/x src/main.rs`, `git checkout -- src/main.rs` and `git restore src/main.rs` is the tool call through `Bash` in the main tree, where `src/main.rs` is tracked
+- **THEN** every one of them blocks with rule `main-tree`, and the same set through `PowerShell` blocks with the same stderr lines
+
+#### Scenario: Bash writing shapes elsewhere allowed
+- **WHEN** the tool call is `echo x > notes.txt` (an untracked path in the main tree), `echo x > <scratchpad>/x`, or `echo x > <worktrees dir>/wt/README.md`, through `Bash`
+- **THEN** the hook allows each of them
+
+#### Scenario: Interpreter write is not blocked before the fact
+- **WHEN** the tool call is a `python - <<'EOF' … EOF` heredoc that rewrites a tracked main-tree file, through `Bash`
+- **THEN** the pre-tool hook allows it
+
 #### Scenario: Rule disabled per repo
 - **WHEN** `ratchet.toml` lists `python-venv` under `guardrails.off` and the tool call is `python scripts/x.py`
 - **THEN** the hook allows it
@@ -112,6 +185,136 @@ the id of an existing one SHALL replace it; a repo SHALL be able to disable a ru
 #### Scenario: Machine-wide rule overrides a built-in
 - **WHEN** the machine rules file redefines `git-destructive` with a different message and the tool call is `git reset --hard`
 - **THEN** the hook blocks with the machine message
+
+### Requirement: A rule that fails validation is dropped, not fatal
+A guardrail rule from the repo's `ratchet.toml` (`[[guardrails.rules]]`) or from the repo's
+extra rules file that fails validation — a `name` reusing a built-in id, an empty
+`tools = []`, a `match` that does not compile as a regex, an unknown key, an empty `message`,
+or a `message` with no stated alternative — SHALL be left out of the rule set on its own: the
+built-ins and every other valid rule, from either file, SHALL still apply to `PreToolUse`. A
+`ratchet.log` entry SHALL name the dropped rule, the file it came from, and the reason it was
+dropped. The session-start briefing SHALL print one line for each rule left out this way,
+naming the rule, its file, and the reason, once per session start. `ratchet guardrails list`
+SHALL keep refusing (exit 1) as today, since it validates the raw config directly rather than
+loading the resilient rule set the hooks use.
+
+#### Scenario: Inline rule named env-files still leaves the builtin blocking
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry with `name = "env-files"` and a `Write` targets `.env`
+- **THEN** the pre-tool hook still blocks with the built-in rule `env-files` (exit 2)
+
+#### Scenario: Inline rule named main-tree still leaves the builtin blocking
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry with `name = "main-tree"` and an `Edit` targets a tracked file of the main tree
+- **THEN** the pre-tool hook still blocks with the built-in rule `main-tree`
+
+#### Scenario: A bad regex drops only its own rule
+- **WHEN** `ratchet.toml` declares a `[[guardrails.rules]]` entry whose `match` does not compile as a regex, alongside a second, valid inline rule, and the tool call is `git reset --hard HEAD~1`
+- **THEN** the pre-tool hook still blocks with the built-in rule `git-destructive`, and a tool call matching the second inline rule's own pattern is still blocked by that rule
+
+#### Scenario: The briefing names each rule left out
+- **WHEN** the repo has one invalid inline rule in `ratchet.toml` and the session-start hook runs
+- **THEN** stdout has exactly one line naming the rule, `ratchet.toml`, and the reason it was left out
+
+#### Scenario: No invalid rule, no left-out line
+- **WHEN** the repo has no invalid guardrail rule and the session-start hook runs
+- **THEN** the briefing has no line naming a rule left out
+
+### Requirement: A ratchet.toml or extra rules file that fails to parse degrades to built-ins, not fail-open
+A repo whose `ratchet.toml` exists but fails to parse — bad TOML syntax, or a top-level shape
+the schema does not accept — is still an opted-in repo, not "no marker" (see *Repo opt-in by
+marker*): the file exists and names an owner who asked for enforcement, and allowing every tool
+call for the rest of the session over a typo is worse than enforcing what ratchet already knows
+how to enforce. When the repo's `ratchet.toml` or its extra rules file cannot be parsed, ratchet
+SHALL keep enforcing the built-in rules (and every layer that did parse), SHALL write a
+`ratchet.log` entry naming the file and the parse error, and the session-start briefing SHALL
+still be printed with one line naming the file that could not be read and the reason, telling
+the owner to fix it. `ratchet guardrails list` and `ratchet guardrails test` SHALL keep refusing
+with exit 1, since they validate the raw config directly rather than loading the resilient rule
+set the hooks use.
+
+#### Scenario: Env file write blocked despite a broken ratchet.toml
+- **WHEN** `ratchet.toml` has a TOML syntax error and a `Write` targets `.env`
+- **THEN** the pre-tool hook still blocks with the built-in rule `env-files` (exit 2)
+
+#### Scenario: Destructive git blocked despite a broken ratchet.toml
+- **WHEN** `ratchet.toml` has a TOML syntax error and the tool call is `git reset --hard`
+- **THEN** the pre-tool hook still blocks with the built-in rule `git-destructive` (exit 2)
+
+#### Scenario: Briefing names the broken ratchet.toml and the reason
+- **WHEN** `ratchet.toml` has a TOML syntax error and the session-start hook runs
+- **THEN** stdout is not empty, and has exactly one line naming `ratchet.toml` and the parse error
+
+#### Scenario: A broken extra rules file still leaves builtins and inline rules blocking
+- **WHEN** the repo's extra rules file has a TOML syntax error, the repo's own `ratchet.toml`
+  also declares a valid inline `[[guardrails.rules]]` rule, and a `Write` targets `.env`
+- **THEN** the pre-tool hook still blocks with the built-in rule `env-files`, a tool call
+  matching the inline rule's own pattern is still blocked by it, and the session-start briefing
+  names the extra rules file
+
+#### Scenario: guardrails list refuses on a broken ratchet.toml
+- **WHEN** `ratchet.toml` has a TOML syntax error and `ratchet guardrails list` runs
+- **THEN** it exits 1 and stderr names `ratchet.toml`
+
+### Requirement: Main-tree writes detected after the fact
+In PostToolUse for `Bash` and `PowerShell` inside an opted-in repo, ratchet SHALL compare the
+set of modified tracked files of the main tree (`git status --porcelain --untracked-files=no`
+at the main root) with the set recorded by the matching PreToolUse, and when a tracked file of
+the main tree changed during the command, SHALL print one stderr line prefixed
+`[ratchet guardrail:main-tree]` naming the changed file(s) and the worktree alternative, and
+SHALL record one event of kind `guardrail.main_tree_write` with the session, the command and
+the files. It SHALL never block (exit 0, no decision), SHALL stay silent when nothing tracked
+changed, and SHALL stay within the hook's time budget: at most one `git status` per hook, the
+"before" set being taken by the PreToolUse that already runs for the command.
+
+#### Scenario: A Bash command that changed a tracked main-tree file is reported after the fact
+- **WHEN** the pre-tool hook ran for a `python` heredoc, the command rewrote a tracked file of the main tree, and the post-tool hook runs with the same session and command
+- **THEN** the post-tool hook exits 0 with no decision, stderr has exactly one line containing `[ratchet guardrail:main-tree]` and the file's path, and the events log holds one `guardrail.main_tree_write` event for that session naming the file
+
+#### Scenario: Post-check is silent when nothing tracked changed
+- **WHEN** the pre-tool hook ran for a command, the command only created an untracked file in the main tree, and the post-tool hook runs
+- **THEN** stdout and stderr are empty, exit 0, and no event is recorded
+
+#### Scenario: Post-check without a prior snapshot is silent
+- **WHEN** the post-tool hook runs for a `Bash` call whose PreToolUse never recorded a snapshot for this session
+- **THEN** stdout and stderr are empty and exit 0
+
+### Requirement: Big reads go to a cheap reader, not into the orchestrator's context
+In PreToolUse inside an opted-in repo, the built-in rule `big-read` SHALL block a `Read` whose
+`file_path` is a regular file of more than `[guardrails] big_read_lines` lines (default 350)
+when the call gives neither `offset` nor `limit`, and SHALL block a `Bash`/`PowerShell`
+segment whose command is `cat`, `head`, `tail`, `less` or `more` over such a file when the
+segment is not part of a pipe. The message SHALL name three alternatives: `Read` with
+`offset` and `limit`, the `reader` agent with the file and a question, and `grep` for the
+lines wanted. The rule SHALL NOT apply to a file inside the repo's worktrees directory (that is
+where implementers read whole files), to a file that does not exist, or to a segment with a
+pipe. Like every built-in it SHALL be disableable by id and its threshold SHALL be
+overridable per repo. Counting lines SHALL skip the read entirely when the file's size in bytes
+is at most `big_read_lines` (a file cannot have more lines than bytes), and otherwise SHALL read
+the file once, stopping as soon as the count passes the threshold, so the hot path stays under
+the latency ceiling.
+
+#### Scenario: Read of a big main-tree file blocked
+- **WHEN** a `Read` targets a tracked main-tree file of 400 lines with no `offset` or `limit`
+- **THEN** the hook blocks with rule `big-read` and the message names `offset`, `limit` and the `reader` agent
+
+#### Scenario: Read with a window allowed
+- **WHEN** a `Read` targets the same 400-line file with `limit: 80`
+- **THEN** the hook allows it
+
+#### Scenario: Small file allowed
+- **WHEN** a `Read` targets a file of 349 lines with no window
+- **THEN** the hook allows it
+
+#### Scenario: cat of a big file blocked, piped cat allowed
+- **WHEN** the tool call is `cat src/big.rs` through `Bash` where `src/big.rs` has 400 lines
+- **THEN** the hook blocks with rule `big-read`, while `cat src/big.rs | grep fn` and `head -40 src/big.rs | cat` are allowed
+
+#### Scenario: Big file inside a worktree allowed
+- **WHEN** a `Read` targets a 400-line file under the repo's worktrees directory with no window
+- **THEN** the hook allows it
+
+#### Scenario: Threshold overridden per repo
+- **WHEN** `ratchet.toml` sets `big_read_lines = 1000` under `[guardrails]` and a `Read` targets a 400-line main-tree file with no window
+- **THEN** the hook allows it, and with `big_read_lines = 100` it blocks
 
 ### Requirement: Hooks never break a session
 On any internal error (invalid config, malformed payload, unexpected failure) a hook SHALL
@@ -150,9 +353,12 @@ of at most 40 lines containing: the repo, the abbreviated session identifier and
 session's own tasks in progress with their last handoff; the repo's tasks in progress held by
 sessions that died, with their last handoff; up to five tasks ready to take, ordered by priority;
 and one line naming the commands and the skill with the full guide. When the repo has none of those
-tasks, the briefing SHALL be a single line. The briefing SHALL be built before the work of dead
-sessions is returned to the queue, so an orphaned task is shown once with its handoff before it goes
-back.
+tasks, the briefing SHALL be a single line, plus the map freshness line when the map capability has
+one to show (see `openspec/specs/map/spec.md`). When the repo has an `AGENTS.md` at its root, the
+briefing SHALL add exactly one more line, `rules: AGENTS.md`, right after the header — pointing at
+the file, never restating it (owner decision: a repo's own rules live in `AGENTS.md`, nowhere
+else). The briefing SHALL be built before the work of dead sessions is returned to the queue, so an
+orphaned task is shown once with its handoff before it goes back.
 
 #### Scenario: Briefing with orphans and ready tasks
 - **WHEN** a session starts in a repo with one task held by a dead session and three ready to take
@@ -160,17 +366,34 @@ back.
 
 #### Scenario: No tasks, one line
 - **WHEN** a session starts in a repo with no tasks in progress, none orphaned and none ready
-- **THEN** the briefing is exactly one line, with the repo, the session and the branch
+- **THEN** the briefing is exactly one line, with the repo, the session and the branch, apart from the map freshness line and the rules line
 
 #### Scenario: The briefing never exceeds forty lines
 - **WHEN** a session starts in a repo with far more tasks than fit
 - **THEN** the briefing is at most 40 lines, the last two say where to see the rest and name the commands, and nothing is cut mid-line
 
+#### Scenario: Repo rules line when AGENTS.md exists
+- **WHEN** a session starts in a repo with no tasks in progress, none orphaned and none ready, and the repo has an `AGENTS.md` at its root
+- **THEN** the briefing's second line is exactly `rules: AGENTS.md`, and the file is not otherwise mentioned
+
+#### Scenario: No rules line when AGENTS.md is absent
+- **WHEN** a session starts in a repo with no `AGENTS.md` at its root
+- **THEN** the briefing has no line mentioning `AGENTS.md`
+
 ### Requirement: Task reminder on every prompt
 On every user prompt in an opted-in repo, if the session holds a task in progress, the hook SHALL
 add to the context exactly one line with the identifier, the status, the progress and the abbreviated
-last handoff, and say how many other tasks it holds when there are more. If the session holds no
-task, the hook SHALL add nothing at all.
+last handoff, and say how many other tasks it holds when there are more. When a subagent of the
+session stopped since the last prompt and the first held task received no handoff, no checklist
+change, no note and no status change after that stop, the hook SHALL add one more line naming the
+task and the stopped subagent. When a subagent started and has no stop since, the hook SHALL add
+one more line naming the task and the running subagent. If the session holds no task, the hook
+SHALL add nothing at all. "The first held task" — here, on the line's own identifier/status/
+progress, and for which subagent events count as "of" it — is always the one with the lowest task
+identifier among the tasks the session holds in progress: the same task a `subagent.start` or
+`subagent.stop` event is attributed to when it is recorded (sessions spec, "Subagent start and
+stop"), so the task this line names and the task an event was actually recorded against can never
+disagree.
 
 #### Scenario: With a claimed task
 - **WHEN** a session holding a task at 2 of 5 receives a prompt
@@ -179,6 +402,18 @@ task, the hook SHALL add nothing at all.
 #### Scenario: Without a claimed task
 - **WHEN** a session holding no task receives a prompt
 - **THEN** the hook adds no output at all
+
+#### Scenario: A subagent stopped with no record adds a line
+- **WHEN** a session holding a task receives a prompt after one of its subagents stopped and nothing was recorded against that task since the stop
+- **THEN** the context gains the task line plus one line naming the task and the stopped subagent
+
+#### Scenario: A subagent stopped with a record adds no line
+- **WHEN** a session holding a task receives a prompt after one of its subagents stopped but a note was recorded against that task since the stop
+- **THEN** the context gains the task line and no subagent line
+
+#### Scenario: A running subagent adds a line
+- **WHEN** a session holding a task receives a prompt while one of its subagents started and never stopped
+- **THEN** the context gains the task line plus one line naming the task and the running subagent
 
 ### Requirement: Handoff rule when the session closes
 When a session tries to close while holding at least one task in progress that received no handoff,
@@ -217,3 +452,7 @@ directory, and the terminal SHALL receive the first 20 lines plus the path of th
 #### Scenario: A task listing is one line per task
 - **WHEN** an agent lists the tasks ready to take
 - **THEN** each task takes exactly one line with its identifier, status, priority, title and progress
+
+#### Scenario: Subagent events appear in the detail view
+- **WHEN** a subagent stop was recorded against a task
+- **THEN** the detail view of that task lists the stop event with the other events of its history

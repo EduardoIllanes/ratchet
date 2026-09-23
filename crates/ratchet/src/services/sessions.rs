@@ -216,9 +216,11 @@ pub fn resolve(
     now: DateTime<Utc>,
 ) -> Result<Option<String>, ServiceError> {
     if let Some(id) = explicit.filter(|s| !s.is_empty()) {
+        reject_agent_shaped(id)?;
         return Ok(Some(id.to_string()));
     }
     if let Some(id) = env.get("RATCHET_SESSION_ID").filter(|s| !s.is_empty()) {
+        reject_agent_shaped(id)?;
         return Ok(Some(id.clone()));
     }
     let here = repo::normalize(cwd);
@@ -240,6 +242,21 @@ pub fn resolve(
         }
     }
     Ok(best.map(|b| b.2))
+}
+
+/// Neither `--session` nor `RATCHET_SESSION_ID` can name an agent identity directly (T-0016): a
+/// value containing `/` is refused before any registration lookup or attribution runs and before
+/// anything is written. Distinct from, and checked before, "session … is not registered" — the
+/// pair identity `(session, agent)` this requirement introduces is the one shape nobody can type,
+/// because it never comes from a string on the command line, only from what the harness reported
+/// to a pre-tool hook.
+fn reject_agent_shaped(id: &str) -> Result<(), ServiceError> {
+    if id.contains('/') {
+        return Err(ServiceError::Invalid(format!(
+            "session identifier cannot contain '/': {id}"
+        )));
+    }
+    Ok(())
 }
 
 /// How many components of `root` cover `target`; `None` when it does not cover it.
@@ -417,6 +434,30 @@ mod tests {
         // Dead sessions do not answer for a directory.
         let late = at("2026-09-16T13:30:00Z");
         assert_eq!(resolve(&c, None, &env, &deep, &th, late).unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_refuses_an_explicit_or_environment_value_shaped_like_a_pair() {
+        let c = conn();
+        let dir = tempfile::TempDir::new().unwrap();
+        let th = Thresholds::default();
+        let now = at("2026-09-16T12:00:00Z");
+        let err = resolve(
+            &c,
+            Some("s-1/agent-x"),
+            &HashMap::new(),
+            dir.path(),
+            &th,
+            now,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::Invalid(_)));
+        assert!(err.to_string().contains("cannot contain"), "{err}");
+
+        let mut env = HashMap::new();
+        env.insert("RATCHET_SESSION_ID".to_string(), "s-1/agent-x".to_string());
+        let err = resolve(&c, None, &env, dir.path(), &th, now).unwrap_err();
+        assert!(err.to_string().contains("cannot contain"), "{err}");
     }
 
     #[test]

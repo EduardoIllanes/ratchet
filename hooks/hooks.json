@@ -11,8 +11,15 @@
       { "matcher": "Bash|PowerShell|Edit|Write|NotebookEdit|MultiEdit",
         "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" hook pre-tool", "shell": "bash", "timeout": 10 } ] }
     ],
+    "PostToolUse": [
+      { "matcher": "Bash|PowerShell",
+        "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" hook post-tool", "shell": "bash", "timeout": 10 } ] }
+    ],
     "Stop": [
       { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" hook stop", "shell": "bash", "timeout": 10 } ] }
+    ],
+    "SubagentStart": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" hook subagent-start", "shell": "bash", "timeout": 10 } ] }
     ],
     "SubagentStop": [
       { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" hook subagent-stop", "shell": "bash", "timeout": 10 } ] }
