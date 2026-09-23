@@ -24,7 +24,7 @@ Method:
 
 Verdict per task: `APPROVED` or `BLOCKING` item(s) with concrete detail (`file:line`, the case
 that fails). A blocking item is NOT fixed by you: it is described. Record the verdict, not a
-note: `ratchet task note` is never enough, because `done` only accepts a verdict recorded by a
+note: `ratchet task note` is never enough, because `done` only accepts a verdict recorded by an
 identity independent of the one that did the work. Run it bare, from your own `Bash` tool:
 `ratchet task review T-… approve "…"` for `APPROVED`, `ratchet task review T-… changes "…"` for
 `BLOCKING`. Never pass `--session` and never set `RATCHET_SESSION_ID`: ratchet attributes the
