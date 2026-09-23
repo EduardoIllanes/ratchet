@@ -29,10 +29,19 @@ fn sessions__migrations_apply_once() {
         "got: {}",
         stdout(&first)
     );
+    // Derive the reached version from the first run's own output instead of hardcoding the
+    // latest migration number, so adding a migration doesn't make this scenario stale.
+    let first_out = stdout(&first);
+    let reached_version = first_out
+        .lines()
+        .find_map(|l| l.strip_prefix("now at version "))
+        .unwrap_or_else(|| panic!("no \"now at version\" line: {first_out}"));
+
     let second = cli(&sb, &["db", "migrate"], &sb.root(), &[]);
     assert_eq!(code(&second), 0);
-    assert!(
-        stdout(&second).contains("already at version 1"),
+    assert_eq!(
+        stdout(&second).trim(),
+        format!("already at version {reached_version}"),
         "got: {}",
         stdout(&second)
     );
