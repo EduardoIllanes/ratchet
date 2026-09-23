@@ -1,6 +1,7 @@
 //! One test per `#### Scenario` of openspec/specs/agent-protocol/spec.md, named by slug.
 
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::support::*;
@@ -977,6 +978,150 @@ fn agent_protocol__threshold_overridden_per_repo() {
         stderr(&blocked).starts_with("[ratchet guardrail:big-read]"),
         "{}",
         stderr(&blocked)
+    );
+}
+
+// --- Requirement: The PreToolUse matcher covers every builtin rule tool -----------
+
+/// crates/ratchet → repo root, matching the pattern the `agent_frontmatter` and `scenarios`
+/// tests already use to locate repo files by `CARGO_MANIFEST_DIR` rather than the process cwd.
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
+}
+
+#[test]
+fn agent_protocol__pretooluse_matcher_covers_every_builtin_rule_tool() {
+    let root = repo_root();
+    let hooks_text = fs::read_to_string(root.join("hooks/hooks.json")).unwrap();
+    let hooks_json: serde_json::Value = serde_json::from_str(&hooks_text).unwrap();
+    let matcher = hooks_json["hooks"]["PreToolUse"][0]["matcher"]
+        .as_str()
+        .expect("hooks.json has a PreToolUse matcher");
+    let matcher_tools: std::collections::HashSet<&str> = matcher.split('|').collect();
+
+    let builtin_text =
+        fs::read_to_string(root.join("crates/ratchet/src/guardrails/builtin.toml")).unwrap();
+    let builtin: toml::Value = toml::from_str(&builtin_text).unwrap();
+    let rules = builtin["rules"]
+        .as_array()
+        .expect("builtin.toml has [[rules]]");
+    let mut missing = Vec::new();
+    for rule in rules {
+        let id = rule["id"].as_str().unwrap_or("<unknown rule>");
+        let tools = rule["tools"].as_array().expect("rule declares tools");
+        for tool in tools {
+            let tool = tool.as_str().unwrap_or_default();
+            if !tool.is_empty() && !matcher_tools.contains(tool) {
+                missing.push(format!("{tool} (rule {id})"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "hooks/hooks.json PreToolUse matcher {matcher:?} is missing tool(s) named by a builtin \
+         rule in builtin.toml: {}",
+        missing.join(", ")
+    );
+}
+
+// --- Requirement: Git Bash / MSYS drive paths resolve to their Windows form -------
+
+/// Windows drive path (`C:\x\y` or `C:/x/y`) → its Git-Bash/MSYS form (`/c/x/y`), the
+/// translation `is_big_outside_worktree` (big_read.rs) and `resolves_to_tracked_main_tree`
+/// (main_tree.rs) are required to apply before their `is_absolute()` check, on Windows only.
+#[cfg(windows)]
+fn to_msys_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    let bytes = s.as_bytes();
+    assert!(
+        bytes.len() > 2 && bytes[1] == b':',
+        "expected a drive-letter path, got {s}"
+    );
+    let drive = (bytes[0] as char).to_ascii_lowercase();
+    let rest = s[2..].replace('\\', "/");
+    let rest = rest.trim_start_matches('/');
+    format!("/{drive}/{rest}")
+}
+
+/// The same path in its `/cygdrive/<letter>/...` form.
+#[cfg(windows)]
+fn to_cygdrive_path(p: &Path) -> String {
+    format!("/cygdrive{}", to_msys_path(p))
+}
+
+#[cfg(windows)]
+#[test]
+fn agent_protocol__git_bash_drive_path_resolves_on_windows() {
+    let sb = sandbox();
+    let root = sb.root();
+    let file = root.join("big.py");
+    fs::write(&file, n_lines(400)).unwrap();
+    git(&root, &["add", "big.py"]);
+    git(&root, &["commit", "-q", "-m", "big"]);
+    let msys = to_msys_path(&file);
+    let cygdrive = to_cygdrive_path(&file);
+
+    let via_head = hook_in(
+        &sb,
+        "pre-tool",
+        &bash(&format!("head -n 3 {msys}"), &root),
+        &root,
+    );
+    assert_eq!(code(&via_head), 2, "stderr: {}", stderr(&via_head));
+    assert!(
+        stderr(&via_head).starts_with("[ratchet guardrail:big-read]"),
+        "{}",
+        stderr(&via_head)
+    );
+
+    let via_head_cygdrive = hook_in(
+        &sb,
+        "pre-tool",
+        &bash(&format!("head -n 3 {cygdrive}"), &root),
+        &root,
+    );
+    assert_eq!(
+        code(&via_head_cygdrive),
+        2,
+        "stderr: {}",
+        stderr(&via_head_cygdrive)
+    );
+    assert!(
+        stderr(&via_head_cygdrive).starts_with("[ratchet guardrail:big-read]"),
+        "{}",
+        stderr(&via_head_cygdrive)
+    );
+
+    let via_read = hook_in(&sb, "pre-tool", &read(&PathBuf::from(&msys), &root), &root);
+    assert_eq!(code(&via_read), 2, "stderr: {}", stderr(&via_read));
+    assert!(
+        stderr(&via_read).starts_with("[ratchet guardrail:big-read]"),
+        "{}",
+        stderr(&via_read)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn agent_protocol__git_bash_path_write_into_the_main_tree_blocked_on_windows() {
+    let sb = sandbox();
+    let root = sb.root();
+    // `tracked.txt` is committed by `sandbox()` itself.
+    let msys = to_msys_path(&root.join("tracked.txt"));
+    let out = hook_in(
+        &sb,
+        "pre-tool",
+        &bash(&format!("echo x > {msys}"), &root),
+        &root,
+    );
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("[ratchet guardrail:main-tree]"),
+        "{}",
+        stderr(&out)
     );
 }
 

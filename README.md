@@ -376,6 +376,11 @@ ported is deliberately not planned for `ratchet` — it stays in `ops`.
 
 ## Status
 
+v0.2.1 — Windows fixes: the big-read guardrail now sees whole-file `Read` calls (the PreToolUse
+matcher was missing `Read`), Git Bash drive paths (`/c/...`, `/cygdrive/c/...`) resolve for
+big-read and main-tree, `ratchet config init` prints a native repo root, and CI is green on
+Windows.
+
 v0.2.0 — groups 0-7 of the design spec are shipped. New since v0.1.1: `ratchet map`, the
 big-read guardrail, subagent lifecycle on the board, `ratchet usage` (token cost per task, role
 and model), task review verdicts with a done gate that requires an independent approve (attributed

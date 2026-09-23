@@ -32,7 +32,9 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: test (gate; latency excluded)
-        run: cargo test -p ratchet -- --skip pre_tool_median_under_ceiling
+        run: cargo test -p ratchet -- --skip pre_tool_median_under_ceiling --skip agent_protocol__pre_tool_answers_fast
       - name: latency (report only)
         continue-on-error: true
-        run: cargo test -p ratchet --release --test latency -- --nocapture
+        run: |
+          cargo test -p ratchet --release --test latency -- --nocapture
+          cargo test -p ratchet --test spec agent_protocol__pre_tool_answers_fast -- --nocapture

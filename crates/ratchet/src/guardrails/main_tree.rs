@@ -8,11 +8,12 @@
 //! `node`, a heredoc script) is not a recognised shape and is not caught here — see
 //! `guardrail.main_tree_write`, emitted after the fact by the post-tool hook.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
 
 use super::eval::GuardContext;
+use super::paths::resolve_tool_path;
 use super::rules::Rule;
 use super::segment::{scan_token, segments, tokenize};
 use crate::repo::{is_tracked, within};
@@ -56,10 +57,7 @@ pub fn writes_main_tree(tool_name: &str, tool_input: &Value, ctx: &GuardContext)
 }
 
 fn resolves_to_tracked_main_tree(raw: &str, ctx: &GuardContext, main_root: &Path) -> bool {
-    let mut target = PathBuf::from(raw);
-    if !target.is_absolute() {
-        target = ctx.cwd.join(target);
-    }
+    let target = resolve_tool_path(raw, &ctx.cwd, cfg!(windows));
     if !within(&target, main_root) {
         return false;
     }

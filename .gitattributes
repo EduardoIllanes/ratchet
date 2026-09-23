@@ -1,0 +1,27 @@
+# Normalize line endings for anything git detects as text; this does not force a checkout
+# line ending on its own (that needs an explicit `eol=` rule, below).
+* text=auto
+
+# Agent/skill/command markdown is read by hand-rolled frontmatter parsers (e.g.
+# crates/ratchet/tests/agent_frontmatter.rs) that key off "---" fence lines. That parser is
+# now CRLF-tolerant too (T-0019), but pinning these to LF keeps Windows checkouts byte-identical
+# to macOS/Linux and avoids the same class of bug elsewhere.
+agents/**/*.md text eol=lf
+skills/**/*.md text eol=lf
+commands/**/*.md text eol=lf
+
+# hooks/*.sh run directly under /bin/sh or bash. hooks/run-hook.cmd is a polyglot: its
+# `: << 'CMDBLOCK' ... CMDBLOCK` heredoc is matched by /bin/sh against the exact line
+# "CMDBLOCK" — a CRLF-mangled terminator ("CMDBLOCK\r") would fail to match, so the heredoc
+# would swallow the rest of the script instead of terminating. Both must stay LF.
+hooks/*.sh text eol=lf
+hooks/run-hook.cmd text eol=lf
+
+# Config formats read by hand-rolled or line-oriented parsers elsewhere in the repo (e.g.
+# crates/ratchet/tests/spec/agent_protocol.rs parsing hooks/hooks.json and builtin.toml).
+*.toml text eol=lf
+*.json text eol=lf
+
+# OpenSpec specs and config, read by str::lines()/substring-matching test code
+# (crates/ratchet/tests/scenarios.rs and friends).
+openspec/** text eol=lf

@@ -37,7 +37,13 @@ fn map__generating_a_map_prints_the_wrote_line() {
     let s = stdout(&out);
     let first_line = s.lines().next().unwrap();
     assert!(first_line.starts_with("wrote "), "{first_line}");
-    assert!(first_line.contains(".ratchet/map.md"), "{first_line}");
+    // The product prints the OS-native path (e.g. `...\.ratchet\map.md` on Windows), so compare
+    // against the native form rather than assuming forward slashes.
+    let native = std::path::Path::new(".ratchet").join("map.md");
+    assert!(
+        first_line.contains(&*native.to_string_lossy()),
+        "{first_line}"
+    );
     assert!(sb.root().join(".ratchet/map.md").is_file());
 }
 

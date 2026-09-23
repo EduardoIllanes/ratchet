@@ -66,7 +66,21 @@ fn git_toplevel(cwd: &Path) -> Option<PathBuf> {
     if s.is_empty() {
         return None;
     }
-    Some(PathBuf::from(s))
+    Some(native_path(&PathBuf::from(s)))
+}
+
+/// Rebuilds `p` using this platform's native separator, without touching case or resolving
+/// symlinks (unlike `repo::normalize`, which does both and is meant for comparison, not
+/// display/writing). Git always prints `/`-separated paths, even on Windows (`rev-parse
+/// --show-toplevel`, `--git-common-dir`, `worktree list --porcelain`, ...); joining that
+/// straight into a `PathBuf` with `Path::join` leaves the git-printed prefix `/`-separated
+/// while the joined suffix picks up `\`, so the result mixes separators when printed or
+/// written to a file. `Path::components()` parses both `/` and `\` as separators on Windows, so
+/// collecting them back into a fresh `PathBuf` re-renders the whole path with the native
+/// separator. Deliberately not `fs::canonicalize`, which on Windows prefixes the result with
+/// `\\?\` (a verbatim path other tools, and the tests here, do not expect).
+fn native_path(p: &Path) -> PathBuf {
+    p.components().collect()
 }
 
 #[cfg(test)]
@@ -78,5 +92,34 @@ mod tests {
     fn template_parses_with_default_branch_main() {
         let cfg: RepoConfig = toml::from_str(TEMPLATE).unwrap();
         assert_eq!(cfg.repo.default_branch.as_deref(), Some("main"));
+    }
+
+    /// The scenario CI actually hit on Windows: git prints a `/`-separated absolute path
+    /// (drive letter included), which must come back fully native-separated, not mixed.
+    ///
+    /// The expected value is built as a literal string, not via repeated `Path::join`: joining
+    /// onto a bare drive prefix like `Path::new("C:")` does not insert a separator (`"C:"
+    /// .join("Users")` is the drive-relative path `"C:Users"`, not `"C:\Users"`), so that
+    /// construction would silently assert the wrong thing on Windows.
+    #[test]
+    fn native_path_rebuilds_a_git_style_forward_slash_path_natively() {
+        let git_printed = Path::new("C:/Users/runneradmin/AppData/Local/Temp/.tmpvLAwlO");
+        let expected = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\runneradmin\AppData\Local\Temp\.tmpvLAwlO")
+        } else {
+            // No drive-letter concept off Windows: `/` is already the native separator, so the
+            // git-printed form is left as-is.
+            git_printed.to_path_buf()
+        };
+        assert_eq!(native_path(git_printed), expected);
+    }
+
+    /// A path with no separators at all to normalize is left alone.
+    #[test]
+    fn native_path_is_a_no_op_on_a_relative_single_component() {
+        assert_eq!(
+            native_path(Path::new("ratchet.toml")),
+            Path::new("ratchet.toml")
+        );
     }
 }
