@@ -62,6 +62,10 @@ without `--force`, or no git repository) SHALL touch no file at all.
 - **WHEN** `ratchet config init` runs in a git repo with no `ratchet.toml` and a `CLAUDE.md` holding `# My rules\n\nDo the thing.\n`
 - **THEN** it exits 0, `CLAUDE.md` still starts with `# My rules\n\nDo the thing.\n`, and the agents block follows that content
 
+#### Scenario: Init appends to a CLAUDE.md that is not valid UTF-8
+- **WHEN** `ratchet config init` runs in a git repo with no `ratchet.toml` and a `CLAUDE.md` holding the bytes `caf\xe9 rules\n` (Latin-1, not UTF-8)
+- **THEN** it exits 0, `CLAUDE.md` still starts with exactly those bytes, and the agents block follows them
+
 #### Scenario: Init with force does not duplicate the agents block
 - **WHEN** `ratchet config init` has already run once in a repo, and `ratchet config init --force` runs again
 - **THEN** it exits 0 and `CLAUDE.md` has exactly one line starting with `<!-- ratchet agents:`, and its bytes are the same as after the first run
