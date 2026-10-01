@@ -60,18 +60,34 @@ fn append_agents_block(root: &Path) -> i32 {
             return 0;
         }
     }
-    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
-    if text.lines().any(|l| l.starts_with("<!-- ratchet agents:")) {
+    let existing = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            eprintln!("error: could not read CLAUDE.md: {e}");
+            return 1;
+        }
+    };
+    if String::from_utf8_lossy(&existing)
+        .lines()
+        .any(|l| l.starts_with("<!-- ratchet agents:"))
+    {
         return 0;
     }
-    if !text.is_empty() {
-        if !text.ends_with('\n') {
-            text.push('\n');
+    let mut addition = String::new();
+    if !existing.is_empty() {
+        if !existing.ends_with(b"\n") {
+            addition.push('\n');
         }
-        text.push('\n');
+        addition.push('\n');
     }
-    text.push_str(AGENTS_BLOCK);
-    if let Err(e) = std::fs::write(&path, text) {
+    addition.push_str(AGENTS_BLOCK);
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, addition.as_bytes()));
+    if let Err(e) = written {
         eprintln!("error: could not write CLAUDE.md: {e}");
         return 1;
     }
