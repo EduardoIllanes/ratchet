@@ -47,8 +47,88 @@ pub fn init(force: bool, cwd: &Path) -> i32 {
         return 1;
     }
     println!("wrote {}", path.display());
+    append_agents_block(&root)
+}
+
+/// Appends `AGENTS_BLOCK` to `<root>/CLAUDE.md` unless a `<!-- ratchet agents:` line is already
+/// there; creates the file when absent. Runs only after `ratchet.toml` is written.
+fn append_agents_block(root: &Path) -> i32 {
+    let path = root.join("CLAUDE.md");
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if !meta.file_type().is_file() {
+            eprintln!("CLAUDE.md is not a regular file; the agents block was not added");
+            return 0;
+        }
+    }
+    let existing = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            eprintln!("error: could not read CLAUDE.md: {e}");
+            return 1;
+        }
+    };
+    if String::from_utf8_lossy(&existing)
+        .lines()
+        .any(|l| l.starts_with("<!-- ratchet agents:"))
+    {
+        return 0;
+    }
+    let mut addition = String::new();
+    if !existing.is_empty() {
+        if !existing.ends_with(b"\n") {
+            addition.push('\n');
+        }
+        addition.push('\n');
+    }
+    addition.push_str(AGENTS_BLOCK);
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, addition.as_bytes()));
+    if let Err(e) = written {
+        eprintln!("error: could not write CLAUDE.md: {e}");
+        return 1;
+    }
+    println!("wired: CLAUDE.md now says when to dispatch reader and researcher");
     0
 }
+
+/// The agents block `init` appends to the repo root's `CLAUDE.md`; fixed text, owned by the user once written.
+const AGENTS_BLOCK: &str = r#"<!-- ratchet agents: when to dispatch reader and researcher. Added once by `ratchet config init`; edit freely, it is never rewritten. -->
+## ratchet: when to dispatch `reader` and `researcher`
+
+Both keep raw content out of your context: they read, you get the answer. A dispatch costs a
+short prompt and a few seconds; a big file read whole costs its full length in your context for
+the rest of the session. Choose on that trade.
+
+**`reader`** (haiku, low effort): big file(s) plus one narrow question; cited `path:line` bullets come back.
+- Dispatch it when the answer is somewhere in a file past the `big-read` threshold (350 lines by
+  default) and you cannot yet say where: a long module, a generated schema, a lockfile, a CI or
+  test log, vendored code.
+- Dispatch it when `big-read` blocks a whole-file read and you would otherwise guess at
+  `offset`/`limit` windows one after another.
+- One dispatch for one question across several files ("which of these modules writes the
+  cache?"); separate dispatches in parallel for unrelated questions.
+- Ask a question, not "summarize this": "where is the retry limit set and what reads it?" gets
+  an answer; "what is in here?" gets a table of contents.
+- Skip it when `grep` finds the line or you already know the range: `Read` with
+  `offset`/`limit` is cheaper than a dispatch.
+- Skip it for a file you are about to edit: you need the exact lines yourself, so read the
+  window you will change.
+- Skip it for a file under the threshold: read it directly.
+
+**`researcher`** (sonnet): facts out of local PDFs, each with a verbatim quote and its page, left as a board note.
+- Dispatch it when the work depends on a PDF already on disk: a spec or RFC, a datasheet, a
+  paper, a contract, a vendor manual, a regulation.
+- Dispatch it instead of running `ratchet pdf` and reading the extract yourself; an extract can
+  run to hundreds of KB.
+- Give it the path(s), one concrete question, and the task id the brief should land on.
+- Skip it when there is no PDF: it reads nothing else, not markdown, not code, not the web.
+- Skip it when the text is already extracted under `~/.ratchet/out/pdf/` and one `grep` there
+  answers the question.
+"#;
 
 fn git_toplevel(cwd: &Path) -> Option<PathBuf> {
     let out = Command::new("git")
@@ -92,6 +172,13 @@ mod tests {
     fn template_parses_with_default_branch_main() {
         let cfg: RepoConfig = toml::from_str(TEMPLATE).unwrap();
         assert_eq!(cfg.repo.default_branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn agents_block_opens_with_the_marker_line() {
+        let first = AGENTS_BLOCK.lines().next().unwrap();
+        assert!(first.starts_with("<!-- ratchet agents:"));
+        assert!(first.contains("reader") && first.contains("researcher"));
     }
 
     /// The scenario CI actually hit on Windows: git prints a `/`-separated absolute path

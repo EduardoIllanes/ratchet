@@ -38,13 +38,49 @@ rules file that fails to parse degrades to built-ins, not fail-open* describes.
 containing the current directory, and SHALL refuse to overwrite an existing marker unless
 `--force` is given. The generated file SHALL be valid for the hooks as written.
 
+Once the marker is written, init SHALL also make sure the repo root's `CLAUDE.md` carries the
+agents block: a section, opened by a line starting with `<!-- ratchet agents:`, that tells the
+orchestrator when dispatching the `reader` and the `researcher` agents pays off and when it does
+not. Without that, nothing in a repo that opted in tells the orchestrator when they are worth a
+dispatch, and they go unused. The block SHALL be appended after any existing content, never
+replacing a line of it; `CLAUDE.md` SHALL be created when absent; and init SHALL write nothing
+to it when it already contains a line starting with `<!-- ratchet agents:`, so a re-run with
+`--force`, or a block the owner edited, is left as it is. A `CLAUDE.md` that exists but is not a
+regular file (a symlink, a directory) SHALL be left untouched: init still writes the marker,
+exits 0, and says on stderr that the block was not added. A refused init (an existing marker
+without `--force`, or no git repository) SHALL touch no file at all.
+
 #### Scenario: Init writes a marker at the repo root
 - **WHEN** `ratchet config init` runs from a subdirectory of a git repo with no `ratchet.toml`
-- **THEN** it exits 0, prints `wrote <root>/ratchet.toml`, and the file parses with `default_branch = "main"`
+- **THEN** it exits 0, the first line of stdout is `wrote <root>/ratchet.toml`, and the file parses with `default_branch = "main"`
+
+#### Scenario: Init creates CLAUDE.md with the agents block
+- **WHEN** `ratchet config init` runs in a git repo with neither `ratchet.toml` nor `CLAUDE.md`
+- **THEN** it exits 0, `<root>/CLAUDE.md` exists, has a line starting with `<!-- ratchet agents:`, and names both `reader` and `researcher`, and stdout mentions `CLAUDE.md`
+
+#### Scenario: Init appends the agents block to an existing CLAUDE.md
+- **WHEN** `ratchet config init` runs in a git repo with no `ratchet.toml` and a `CLAUDE.md` holding `# My rules\n\nDo the thing.\n`
+- **THEN** it exits 0, `CLAUDE.md` still starts with `# My rules\n\nDo the thing.\n`, and the agents block follows that content
+
+#### Scenario: Init appends to a CLAUDE.md that is not valid UTF-8
+- **WHEN** `ratchet config init` runs in a git repo with no `ratchet.toml` and a `CLAUDE.md` holding the bytes `caf\xe9 rules\n` (Latin-1, not UTF-8)
+- **THEN** it exits 0, `CLAUDE.md` still starts with exactly those bytes, and the agents block follows them
+
+#### Scenario: Init with force does not duplicate the agents block
+- **WHEN** `ratchet config init` has already run once in a repo, and `ratchet config init --force` runs again
+- **THEN** it exits 0 and `CLAUDE.md` has exactly one line starting with `<!-- ratchet agents:`, and its bytes are the same as after the first run
+
+#### Scenario: A CLAUDE.md that is not a regular file is left untouched
+- **WHEN** `ratchet config init` runs in a git repo with no `ratchet.toml` and a `CLAUDE.md` that is a directory
+- **THEN** it exits 0, `ratchet.toml` is written, the `CLAUDE.md` directory has no new entry, and stderr names `CLAUDE.md`
 
 #### Scenario: Init refuses to overwrite without force
 - **WHEN** `ratchet config init` runs in a repo that already has a `ratchet.toml`
 - **THEN** it exits 1, the file is unchanged, and stderr mentions `--force`
+
+#### Scenario: A refused init leaves CLAUDE.md alone
+- **WHEN** `ratchet config init` runs without `--force` in a repo that already has a `ratchet.toml` and a `CLAUDE.md` without the agents block
+- **THEN** it exits 1 and `CLAUDE.md` is byte-for-byte unchanged
 
 #### Scenario: Init outside a git repo fails
 - **WHEN** `ratchet config init` runs in a directory that is not inside a git repository

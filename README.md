@@ -121,6 +121,8 @@ Run `/ratchet:init` from a Claude Code session at the repo root (or `ratchet con
 
 Without that file, every hook is a no-op.
 
+Init also appends a short block to the repo's `CLAUDE.md` saying when to dispatch the `reader` and `researcher` agents. It is written once (skipped when a `<!-- ratchet agents:` line is already there) and is yours to edit; a `CLAUDE.md` that is not a regular file is left alone.
+
 ## Guardrails
 
 
@@ -375,6 +377,12 @@ web-fetch flow (approval lists, robots.txt, cache) that the original group 3 pla
 ported is deliberately not planned for `ratchet` — it stays in `ops`.
 
 ## Status
+
+v0.2.2 — `ratchet config init` also appends to the repo's `CLAUDE.md` a block saying when
+dispatching the `reader` and `researcher` agents pays off and when it does not (idempotent, never
+rewrites existing content, skips a `CLAUDE.md` that is not a regular file). Also since v0.2.1: on
+Windows the hook wrapper now propagates a blocking exit code, so guardrails block there too, and
+`reviewer.md` records verdicts with a bare `ratchet task review`.
 
 v0.2.1 — Windows fixes: the big-read guardrail now sees whole-file `Read` calls (the PreToolUse
 matcher was missing `Read`), Git Bash drive paths (`/c/...`, `/cygdrive/c/...`) resolve for

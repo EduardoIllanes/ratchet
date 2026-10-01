@@ -71,7 +71,7 @@ fn agent_protocol__init_writes_a_marker_at_the_repo_root() {
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
     let expected_path = root.join("ratchet.toml");
     assert_eq!(
-        stdout(&out).trim(),
+        stdout(&out).lines().next().unwrap_or(""),
         format!("wrote {}", expected_path.display())
     );
     assert_eq!(stderr(&out), "");
@@ -82,6 +82,94 @@ fn agent_protocol__init_writes_a_marker_at_the_repo_root() {
         Some("main"),
         "{text}"
     );
+}
+
+const AGENTS_MARKER: &str = "<!-- ratchet agents:";
+
+fn agents_marker_lines(text: &str) -> usize {
+    text.lines()
+        .filter(|l| l.starts_with(AGENTS_MARKER))
+        .count()
+}
+
+#[test]
+fn agent_protocol__init_creates_claude_md_with_the_agents_block() {
+    let sb = sandbox();
+    let root = sb.root();
+    fs::remove_file(root.join("ratchet.toml")).unwrap();
+    assert!(!root.join("CLAUDE.md").exists());
+    let out = cli(&sb, &["config", "init"], &root, &[]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    let text = fs::read_to_string(root.join("CLAUDE.md")).expect("CLAUDE.md should exist");
+    assert!(agents_marker_lines(&text) >= 1, "{text}");
+    assert!(text.contains("reader"), "{text}");
+    assert!(text.contains("researcher"), "{text}");
+    assert!(stdout(&out).contains("CLAUDE.md"), "{}", stdout(&out));
+}
+
+#[test]
+fn agent_protocol__init_appends_the_agents_block_to_an_existing_claude_md() {
+    let sb = sandbox();
+    let root = sb.root();
+    fs::remove_file(root.join("ratchet.toml")).unwrap();
+    let original = "# My rules\n\nDo the thing.\n";
+    fs::write(root.join("CLAUDE.md"), original).unwrap();
+    let out = cli(&sb, &["config", "init"], &root, &[]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    let text = fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+    assert!(text.starts_with(original), "{text}");
+    let tail = &text[original.len()..];
+    assert!(
+        tail.lines().any(|l| l.starts_with(AGENTS_MARKER)),
+        "block should follow the original content: {text}"
+    );
+}
+
+#[test]
+fn agent_protocol__init_appends_to_a_claude_md_that_is_not_valid_utf_8() {
+    let sb = sandbox();
+    let root = sb.root();
+    fs::remove_file(root.join("ratchet.toml")).unwrap();
+    let original: &[u8] = b"caf\xe9 rules\n";
+    fs::write(root.join("CLAUDE.md"), original).unwrap();
+    let out = cli(&sb, &["config", "init"], &root, &[]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    let bytes = fs::read(root.join("CLAUDE.md")).unwrap();
+    assert!(bytes.starts_with(original), "{:?}", bytes);
+    let text = String::from_utf8_lossy(&bytes[original.len()..]).into_owned();
+    assert!(text.lines().any(|l| l.starts_with(AGENTS_MARKER)), "{text}");
+}
+
+#[test]
+fn agent_protocol__init_with_force_does_not_duplicate_the_agents_block() {
+    let sb = sandbox();
+    let root = sb.root();
+    fs::remove_file(root.join("ratchet.toml")).unwrap();
+    let first = cli(&sb, &["config", "init"], &root, &[]);
+    assert_eq!(code(&first), 0, "stderr: {}", stderr(&first));
+    let claude = root.join("CLAUDE.md");
+    let after_first = fs::read(&claude).expect("first init should create CLAUDE.md");
+    let out = cli(&sb, &["config", "init", "--force"], &root, &[]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    let after_second = fs::read(&claude).unwrap();
+    let text = String::from_utf8_lossy(&after_second).into_owned();
+    assert_eq!(agents_marker_lines(&text), 1, "{text}");
+    assert_eq!(after_first, after_second);
+}
+
+#[test]
+fn agent_protocol__a_claude_md_that_is_not_a_regular_file_is_left_untouched() {
+    let sb = sandbox();
+    let root = sb.root();
+    fs::remove_file(root.join("ratchet.toml")).unwrap();
+    let claude = root.join("CLAUDE.md");
+    fs::create_dir(&claude).unwrap();
+    let out = cli(&sb, &["config", "init"], &root, &[]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert!(root.join("ratchet.toml").is_file());
+    assert!(claude.is_dir());
+    assert_eq!(fs::read_dir(&claude).unwrap().count(), 0);
+    assert!(stderr(&out).contains("CLAUDE.md"), "{}", stderr(&out));
 }
 
 #[test]
@@ -95,6 +183,20 @@ fn agent_protocol__init_refuses_to_overwrite_without_force() {
     assert!(stderr(&out).contains("--force"), "{}", stderr(&out));
     let after = fs::read_to_string(root.join("ratchet.toml")).unwrap();
     assert_eq!(before, after);
+}
+
+#[test]
+fn agent_protocol__a_refused_init_leaves_claude_md_alone() {
+    let sb = sandbox();
+    let root = sb.root();
+    let original = "# My rules\n\nNo agents block here.\n";
+    fs::write(root.join("CLAUDE.md"), original).unwrap();
+    let out = cli(&sb, &["config", "init"], &root, &[]);
+    assert_eq!(code(&out), 1, "stderr: {}", stderr(&out));
+    assert_eq!(
+        fs::read(root.join("CLAUDE.md")).unwrap(),
+        original.as_bytes()
+    );
 }
 
 #[test]
