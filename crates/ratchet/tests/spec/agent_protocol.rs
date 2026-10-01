@@ -126,6 +126,21 @@ fn agent_protocol__init_appends_the_agents_block_to_an_existing_claude_md() {
 }
 
 #[test]
+fn agent_protocol__init_appends_to_a_claude_md_that_is_not_valid_utf_8() {
+    let sb = sandbox();
+    let root = sb.root();
+    fs::remove_file(root.join("ratchet.toml")).unwrap();
+    let original: &[u8] = b"caf\xe9 rules\n";
+    fs::write(root.join("CLAUDE.md"), original).unwrap();
+    let out = cli(&sb, &["config", "init"], &root, &[]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    let bytes = fs::read(root.join("CLAUDE.md")).unwrap();
+    assert!(bytes.starts_with(original), "{:?}", bytes);
+    let text = String::from_utf8_lossy(&bytes[original.len()..]).into_owned();
+    assert!(text.lines().any(|l| l.starts_with(AGENTS_MARKER)), "{text}");
+}
+
+#[test]
 fn agent_protocol__init_with_force_does_not_duplicate_the_agents_block() {
     let sb = sandbox();
     let root = sb.root();
