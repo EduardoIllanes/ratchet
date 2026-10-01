@@ -121,6 +121,8 @@ Run `/ratchet:init` from a Claude Code session at the repo root (or `ratchet con
 
 Without that file, every hook is a no-op.
 
+Init also appends a short block to the repo's `CLAUDE.md` saying when to dispatch the `reader` and `researcher` agents. It is written once (skipped when a `<!-- ratchet agents:` line is already there) and is yours to edit; a `CLAUDE.md` that is not a regular file is left alone.
+
 ## Guardrails
 
 
