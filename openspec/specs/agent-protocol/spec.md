@@ -52,7 +52,7 @@ without `--force`, or no git repository) SHALL touch no file at all.
 
 #### Scenario: Init writes a marker at the repo root
 - **WHEN** `ratchet config init` runs from a subdirectory of a git repo with no `ratchet.toml`
-- **THEN** it exits 0, prints `wrote <root>/ratchet.toml`, and the file parses with `default_branch = "main"`
+- **THEN** it exits 0, the first line of stdout is `wrote <root>/ratchet.toml`, and the file parses with `default_branch = "main"`
 
 #### Scenario: Init creates CLAUDE.md with the agents block
 - **WHEN** `ratchet config init` runs in a git repo with neither `ratchet.toml` nor `CLAUDE.md`
