@@ -18,6 +18,7 @@ type Rig = {
   agents: Agent[]
   files: string[]
   dirs: string[]
+  stepTokens?: number
 }
 
 const fileStat = { kind: 'file', size: 1, mtimeMs: 0, isLink: false } as const
@@ -78,10 +79,10 @@ function rig(on: On, o: { files?: string[]; dirs?: string[] } = {}): Rig {
       toolUses: [],
       stopReason: 'tool_use',
       usage: {
-        input_tokens: 2000,
+        input_tokens: r.stepTokens ?? 2000,
         output_tokens: 500,
-        cache_read_input_tokens: 40000,
-        cache_creation_input_tokens: 8000,
+        cache_read_input_tokens: r.stepTokens === undefined ? 40000 : 0,
+        cache_creation_input_tokens: r.stepTokens === undefined ? 8000 : 0,
         model: 'claude-sonnet-5-5',
       },
     }
@@ -156,6 +157,28 @@ const BREAKDOWN: SessionContextBreakdown = {
   autoCompactThreshold: 167000,
   isAutoCompactEnabled: true,
   apiUsage: null,
+}
+
+
+type Node = { type?: string; props?: Record<string, unknown>; children?: unknown[] }
+const textOf = (n: unknown): string =>
+  typeof n === 'string' ? n : ((n as Node).children ?? []).map(textOf).join('')
+
+// The props of the bar of the line whose numbers match: the deepest element showing them,
+// whose first element child is the bar (or the element itself when one Text draws the line).
+function barProps(tree: unknown, numbers: RegExp): Record<string, unknown> | undefined {
+  const line = new RegExp(`^\\s*[█░]+\\s*${numbers.source}`)
+  let best: Node | undefined
+  const walk = (n: unknown) => {
+    if (typeof n === 'string') return
+    const node = n as Node
+    if (line.test(textOf(node))) best = node
+    for (const c of node.children ?? []) walk(c)
+  }
+  walk(tree)
+  if (!best) return undefined
+  const bar = (best.children ?? []).find(c => typeof c !== 'string' && /^[█░]+$/.test(textOf(c)))
+  return ((bar as Node | undefined) ?? best).props
 }
 
 const SURFACES = ['terminal', 'desktop'] as const
@@ -302,6 +325,9 @@ test('The pane draws the breakdown on every surface', async ($, on) => {
   for (const c of asked) expect((c as { breakdown?: string }).breakdown).toBe('summary')
 })
 
+const row = (mark: string) =>
+  new RegExp(`${mark}\\s*ratchet:reader[\\s\\S]*Read the big file`)
+
 test('The pane lists subagents with their fill', async ($, on) => {
   const r = rig(on)
   r.breakdown = BREAKDOWN
@@ -310,11 +336,10 @@ test('The pane lists subagents with their fill', async ($, on) => {
   await request($, 'agent-1')
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
-    expect(
-      await ui.find({
-        text: /● ratchet:reader · 50k ~25% · peak 50k · 1 req · Read the big file/,
-      }),
-    ).toBeDefined()
+    expect(await ui.find({ text: row('●') })).toBeDefined()
+    const bar = barProps(await ui.drawn(), /25% · 50k\/200k · 1 req$/)
+    expect(bar?.color).toBe('success')
+    expect(bar?.dimColor).toBeFalsy()
     await ui.unmount()
   }
 })
@@ -328,11 +353,27 @@ test('A finished subagent stays in the pane', async ($, on) => {
   r.agents = []
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
-    expect(
-      await ui.find({
-        text: /○ ratchet:reader · 50k ~25% · peak 50k · 1 req · Read the big file/,
-      }),
-    ).toBeDefined()
+    expect(await ui.find({ text: row('○') })).toBeDefined()
+    const bar = barProps(await ui.drawn(), /25% · 50k\/200k · 1 req$/)
+    expect(bar?.dimColor).toBe(true)
+    await ui.unmount()
+  }
+})
+
+test('A subagent past most of its window is drawn in the error colour with its peak', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.agents = [AGENT1]
+  await start($)
+  r.stepTokens = 180000
+  await request($, 'agent-1')
+  r.stepTokens = 175000
+  await request($, 'agent-1')
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    const bar = barProps(await ui.drawn(), /88% · 175k\/200k · 2 req · peak 180k$/)
+    expect(bar?.color).toBe('error')
+    expect(bar?.dimColor).toBeFalsy()
     await ui.unmount()
   }
 })

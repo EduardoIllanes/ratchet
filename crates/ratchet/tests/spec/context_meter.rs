@@ -20,10 +20,14 @@ fn repo_root() -> PathBuf {
 }
 
 /// Runs `claude <args> <repo root>`; stdout and stderr together, and the exit success.
-fn claude(args: &[&str]) -> (bool, String) {
+fn claude(args: &[&str], target: &str) -> (bool, String) {
     let mut last_err = None;
     for name in ["claude", "claude.cmd"] {
-        match Command::new(name).args(args).arg(repo_root()).output() {
+        match Command::new(name)
+            .args(args)
+            .arg(repo_root().join(target))
+            .output()
+        {
             Ok(out) => {
                 let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
                 text.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -40,7 +44,7 @@ fn claude(args: &[&str]) -> (bool, String) {
 
 fn test_run() -> &'static str {
     static RUN: OnceLock<String> = OnceLock::new();
-    RUN.get_or_init(|| claude(&["plugin", "test"]).1)
+    RUN.get_or_init(|| claude(&["plugin", "test"], "").1)
 }
 
 fn assert_passed(title: &str) {
@@ -61,7 +65,7 @@ fn assert_passed(title: &str) {
 
 #[test]
 fn context_meter__the_plugin_validates_with_the_module_declared() {
-    let (ok, out) = claude(&["plugin", "validate"]);
+    let (ok, out) = claude(&["plugin", "validate"], ".claude-plugin/plugin.json");
     assert!(ok, "`claude plugin validate` failed:\n{out}");
     for needle in [
         "session.start",
@@ -144,6 +148,11 @@ fn context_meter__the_pane_lists_subagents_with_their_fill() {
 #[test]
 fn context_meter__a_finished_subagent_stays_in_the_pane() {
     assert_passed("A finished subagent stays in the pane");
+}
+
+#[test]
+fn context_meter__a_subagent_past_most_of_its_window_is_drawn_in_the_error_colour_with_its_peak() {
+    assert_passed("A subagent past most of its window is drawn in the error colour with its peak");
 }
 
 #[test]
