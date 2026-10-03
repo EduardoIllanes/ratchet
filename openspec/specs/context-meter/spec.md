@@ -117,9 +117,12 @@ In an opted-in session the module SHALL register the `ctx` command, which opens 
 a header `<percentage>% · <totalTokens> / <rawMaxTokens>` followed by the model, a bar of the
 categories across the pane's width, one row per category that is not `deferred` with its tokens
 and its share of `rawMaxTokens` to one decimal, `auto-compact at <threshold>` when auto-compaction
-is on, and, under a `Subagents` heading, one row per agent with a reading that `$.agent.list()`
-names: `<type> · <tokens> ~<percent>% · peak <peak> · <requests> req · <description>`. With no
-breakdown yet it SHALL say `No breakdown yet`. It SHALL draw on the terminal and the desktop.
+is on, and, under a `Subagents` heading, one row per agent with a reading, most recent first:
+`<mark> <type> · <tokens> ~<percent>% · peak <peak> · <requests> req · <description>`, where
+`<mark>` is `●` while `$.agent.list()` reports the agent `running` and `○` otherwise. The engine
+drops an agent from `$.agent.list()` once it is done, so the type and description SHALL be
+captured from that list when a reading is recorded and kept with it. With no breakdown yet the
+pane SHALL say `No breakdown yet`. It SHALL draw on the terminal and the desktop.
 
 #### Scenario: The pane draws the breakdown on every surface
 - **WHEN** the pane is drawn on the terminal and on the desktop over a breakdown of 86000 of 200000 tokens (43%), with a `Messages` row of 80000, a `deferred` row, and auto-compaction at 167000
@@ -127,7 +130,11 @@ breakdown yet it SHALL say `No breakdown yet`. It SHALL draw on the terminal and
 
 #### Scenario: The pane lists subagents with their fill
 - **WHEN** the pane is drawn after one request of subagent `agent-1` (type `ratchet:reader`, description `Read the big file`) resolved with 50000 tokens
-- **THEN** it shows a row `ratchet:reader · 50k ~25% · peak 50k · 1 req · Read the big file`
+- **THEN** it shows a row `● ratchet:reader · 50k ~25% · peak 50k · 1 req · Read the big file`
+
+#### Scenario: A finished subagent stays in the pane
+- **WHEN** one request of running subagent `agent-1` (type `ratchet:reader`, description `Read the big file`) resolved with 50000 tokens, and `$.agent.list()` no longer names it when the pane is drawn
+- **THEN** the pane still shows `○ ratchet:reader · 50k ~25% · peak 50k · 1 req · Read the big file`
 
 #### Scenario: The pane says so before the first response
 - **WHEN** the pane is drawn and `$.session.usage()` returns no breakdown
