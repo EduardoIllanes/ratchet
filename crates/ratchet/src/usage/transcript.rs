@@ -130,6 +130,7 @@ struct RawRecord {
 
 #[derive(Deserialize)]
 struct RawMessage {
+    id: Option<String>,
     model: Option<String>,
     usage: Option<RawUsage>,
     // T-0014: kept as a bare `Value`, not `Option<Vec<Value>>` -- a real record's `content` is
@@ -140,6 +141,13 @@ struct RawMessage {
     // and treats a present-but-non-array value as the degenerate case R2 already has a name for:
     // `partial`, tokens kept.
     content: Option<Value>,
+}
+
+/// One call under construction: its records folded together (T-0034).
+struct Group {
+    call: Call,
+    has_usage: bool,
+    degenerate: bool,
 }
 
 #[derive(Deserialize)]
@@ -167,6 +175,8 @@ pub fn parse(bytes: &[u8]) -> ParseResult {
     let mut out = ParseResult::default();
     let text = String::from_utf8_lossy(bytes);
     let mut understood_any = false;
+    let mut groups: Vec<Group> = Vec::new();
+    let mut by_id: HashMap<String, usize> = HashMap::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -207,30 +217,60 @@ pub fn parse(bytes: &[u8]) -> ParseResult {
         // `partial`, never `skipped`, and the call's tokens (from `usage`, independent of
         // `content`) are kept.
         let content_is_array = raw_content.map(Value::is_array).unwrap_or(true);
-        if raw_usage.is_none() || !content_is_array {
+        let usage = raw_usage.map(|u| Usage {
+            input: u.input_tokens.unwrap_or(0),
+            cache_write: u.cache_creation_input_tokens.unwrap_or(0),
+            cache_read: u.cache_read_input_tokens.unwrap_or(0),
+            output: u.output_tokens.unwrap_or(0),
+            thinking: u
+                .output_tokens_details
+                .as_ref()
+                .and_then(|t| t.thinking_tokens)
+                .unwrap_or(0),
+        });
+        let (tools, tool_use_ids) = extract_tools(raw_content.and_then(Value::as_array));
+        // T-0034: Claude Code writes one record per content block of a response, all sharing
+        // `message.id`; they fold into the first record's slot. Id-less records stay one each.
+        let id = raw
+            .message
+            .as_ref()
+            .and_then(|m| m.id.clone())
+            .filter(|i| !i.is_empty());
+        let slot = id.as_ref().and_then(|i| by_id.get(i).copied());
+        match slot {
+            Some(idx) => {
+                let g = &mut groups[idx];
+                if let Some(u) = usage {
+                    g.call.usage = u;
+                    g.has_usage = true;
+                }
+                g.degenerate |= !content_is_array;
+                g.call.tools.extend(tools);
+                g.call.tool_use_ids.extend(tool_use_ids);
+            }
+            None => {
+                if let Some(i) = id {
+                    by_id.insert(i, groups.len());
+                }
+                groups.push(Group {
+                    call: Call {
+                        ts,
+                        model,
+                        usage: usage.unwrap_or_default(),
+                        tools,
+                        tool_use_ids,
+                    },
+                    has_usage: usage.is_some(),
+                    degenerate: !content_is_array,
+                });
+            }
+        }
+    }
+    for g in groups {
+        if !g.has_usage || g.degenerate {
             out.partial += 1;
         }
-        let usage = raw_usage
-            .map(|u| Usage {
-                input: u.input_tokens.unwrap_or(0),
-                cache_write: u.cache_creation_input_tokens.unwrap_or(0),
-                cache_read: u.cache_read_input_tokens.unwrap_or(0),
-                output: u.output_tokens.unwrap_or(0),
-                thinking: u
-                    .output_tokens_details
-                    .as_ref()
-                    .and_then(|t| t.thinking_tokens)
-                    .unwrap_or(0),
-            })
-            .unwrap_or_default();
-        let (tools, tool_use_ids) = extract_tools(raw_content.and_then(Value::as_array));
-        out.calls.push(Call {
-            ts,
-            model,
-            usage,
-            tools,
-            tool_use_ids,
-        });
+        out.calls.push(g.call);
     }
     if !understood_any {
         out.skipped += 1;
@@ -612,5 +652,101 @@ mod tests {
         assert_eq!(m.tool_use_id.as_deref(), Some("tu-9"));
         assert_eq!(m.model, None);
         assert!(read_meta(b"not json").is_none());
+    }
+
+    fn rec(
+        id: Option<&str>,
+        ts: &str,
+        usage: Option<(u64, u64)>,
+        tool: Option<(&str, &str)>,
+    ) -> String {
+        let mut m = serde_json::json!({"model": "m"});
+        if let Some(i) = id {
+            m["id"] = i.into();
+        }
+        if let Some((i, o)) = usage {
+            m["usage"] = serde_json::json!({"input_tokens": i, "output_tokens": o});
+        }
+        m["content"] = match tool {
+            Some((n, i)) => serde_json::json!([{"type": "tool_use", "name": n, "id": i}]),
+            None => serde_json::json!([{"type": "text", "text": "x"}]),
+        };
+        serde_json::json!({"type": "assistant", "timestamp": ts, "message": m}).to_string()
+    }
+
+    #[test]
+    fn a_group_without_usage_is_one_partial_call() {
+        let b = [
+            rec(Some("a"), "2026-09-16T12:00:00Z", None, None),
+            rec(Some("a"), "2026-09-16T12:00:01Z", None, None),
+        ]
+        .join("\n");
+        let r = parse(b.as_bytes());
+        assert_eq!(r.calls.len(), 1);
+        assert_eq!(r.partial, 1);
+        assert_eq!(r.calls[0].usage, Usage::default());
+    }
+
+    #[test]
+    fn a_group_takes_the_first_timestamp_and_merges_tools_in_order() {
+        let b = [
+            rec(
+                Some("a"),
+                "2026-09-16T12:00:00Z",
+                Some((7, 1)),
+                Some(("Read", "t1")),
+            ),
+            rec(Some("a"), "2026-09-16T12:00:05Z", Some((7, 9)), None),
+            rec(
+                Some("a"),
+                "2026-09-16T12:00:09Z",
+                Some((7, 20)),
+                Some(("Bash", "t2")),
+            ),
+        ]
+        .join("\n");
+        let r = parse(b.as_bytes());
+        assert_eq!(r.calls.len(), 1);
+        assert_eq!(r.partial, 0);
+        let c = &r.calls[0];
+        assert_eq!(c.ts, clock::parse("2026-09-16T12:00:00Z").unwrap());
+        assert_eq!(c.usage.output, 20);
+        assert_eq!(c.tools, vec!["Read", "Bash"]);
+        assert_eq!(c.tool_use_ids, vec!["t1", "t2"]);
+    }
+
+    #[test]
+    fn interleaved_ids_and_an_idless_record_between_group_records() {
+        let b = [
+            rec(Some("a"), "2026-09-16T12:00:00Z", Some((1, 1)), None),
+            rec(Some("b"), "2026-09-16T12:00:01Z", Some((2, 2)), None),
+            rec(None, "2026-09-16T12:00:02Z", Some((4, 4)), None),
+            rec(Some("a"), "2026-09-16T12:00:03Z", Some((1, 5)), None),
+            rec(Some("b"), "2026-09-16T12:00:04Z", Some((2, 6)), None),
+        ]
+        .join("\n");
+        let r = parse(b.as_bytes());
+        let got: Vec<(u64, u64)> = r
+            .calls
+            .iter()
+            .map(|c| (c.usage.input, c.usage.output))
+            .collect();
+        assert_eq!(got, vec![(1, 5), (2, 6), (4, 4)]);
+        assert!(r.calls.windows(2).all(|w| w[0].ts <= w[1].ts));
+    }
+
+    #[test]
+    fn a_string_content_record_in_a_group_is_partial_once() {
+        let s = r#"{"type":"assistant","timestamp":"2026-09-16T12:00:02Z","message":{"id":"a","model":"m","usage":{"input_tokens":1,"output_tokens":3},"content":"str"}}"#;
+        let b = [
+            rec(Some("a"), "2026-09-16T12:00:00Z", Some((1, 1)), None),
+            s.to_string(),
+            s.to_string(),
+        ]
+        .join("\n");
+        let r = parse(b.as_bytes());
+        assert_eq!(r.calls.len(), 1);
+        assert_eq!(r.partial, 1);
+        assert_eq!(r.calls[0].usage.output, 3);
     }
 }
