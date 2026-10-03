@@ -100,7 +100,8 @@ main loop's), its peak, its request count and the model; it SHALL keep the twent
 recently updated. The status line SHALL end with ` · <n> agent(s) (max <tokens>)` — `agent` for
 one, `agents` otherwise — over the agents with a reading that `$.agent.list()` reports as
 `running`, and SHALL have no such tail when none is. A subagent's window is not reported by the
-engine: it SHALL be taken as 200000 tokens, or 1000000 once the agent's peak passed 200000.
+engine: it SHALL be taken as the session model's window as `$.session.usage()` reports it
+(`context.window`), or the agent's peak when that is larger.
 
 #### Scenario: A running subagent's requests tail the status line
 - **WHEN** the main window reads 84000 tokens, 42%, of 200000, and a request of running subagent `agent-1` resolves with 2000 input, 40000 cache-read and 8000 cache-write tokens
@@ -117,11 +118,16 @@ In an opted-in session the module SHALL register the `ctx` command, which opens 
 a header `<percentage>% · <totalTokens> / <rawMaxTokens>` followed by the model, a bar of the
 categories across the pane's width, one row per category that is not `deferred` with its tokens
 and its share of `rawMaxTokens` to one decimal, `auto-compact at <threshold>` when auto-compaction
-is on, and, under a `Subagents` heading, one row per agent with a reading, most recent first:
-`<mark> <type> · <tokens> ~<percent>% · peak <peak> · <requests> req · <description>`, where
-`<mark>` is `●` while `$.agent.list()` reports the agent `running` and `○` otherwise. The engine
-drops an agent from `$.agent.list()` once it is done, so the type and description SHALL be
-captured from that list when a reading is recorded and kept with it. With no breakdown yet the
+is on, and, under a `Subagents` heading, two lines per agent with a reading, most recent first.
+The first is `<mark> <type>` followed by the agent's description, where `<mark>` is `●` while
+`$.agent.list()` reports the agent `running` and `○` otherwise. The second is a bar of the
+agent's fill followed by ` <percent>% · <tokens>/<window> · <requests> req`, with
+` · peak <peak>` added when the peak is above the agent's current tokens. The bar takes the
+columns the second line leaves, at most 20 cells and at least 6, `round(percent × cells / 100)`
+of them `█` and the rest `░`, drawn in the theme's `success` colour below 70%, `warning` from
+70% and `error` from 85%, and dim for an agent that is not running. The engine drops an agent
+from `$.agent.list()` once it is done, so the type and description SHALL be captured from that
+list when a reading is recorded and kept with it. With no breakdown yet the
 pane SHALL say `No breakdown yet`. It SHALL draw on the terminal and the desktop.
 
 #### Scenario: The pane draws the breakdown on every surface
@@ -129,12 +135,16 @@ pane SHALL say `No breakdown yet`. It SHALL draw on the terminal and the desktop
 - **THEN** each drawing shows `43% · 86k / 200k`, a `Messages` row with `80k` and `40.0%`, no row for the deferred category, and `auto-compact at 167k`
 
 #### Scenario: The pane lists subagents with their fill
-- **WHEN** the pane is drawn after one request of subagent `agent-1` (type `ratchet:reader`, description `Read the big file`) resolved with 50000 tokens
-- **THEN** it shows a row `● ratchet:reader · 50k ~25% · peak 50k · 1 req · Read the big file`
+- **WHEN** the pane is drawn, with a 200000-token session window, after one request of running subagent `agent-1` (type `ratchet:reader`, description `Read the big file`) resolved with 50000 tokens
+- **THEN** it shows `● ratchet:reader` with `Read the big file`, and a line led by a bar in the `success` colour reading `25% · 50k/200k · 1 req`
 
 #### Scenario: A finished subagent stays in the pane
-- **WHEN** one request of running subagent `agent-1` (type `ratchet:reader`, description `Read the big file`) resolved with 50000 tokens, and `$.agent.list()` no longer names it when the pane is drawn
-- **THEN** the pane still shows `○ ratchet:reader · 50k ~25% · peak 50k · 1 req · Read the big file`
+- **WHEN** one request of running subagent `agent-1` (type `ratchet:reader`, description `Read the big file`) resolved with 50000 tokens, and `$.agent.list()` no longer names it when the pane is drawn with a 200000-token session window
+- **THEN** the pane still shows `○ ratchet:reader` with `Read the big file`, and a dim bar line reading `25% · 50k/200k · 1 req`
+
+#### Scenario: A subagent past most of its window is drawn in the error colour with its peak
+- **WHEN** a running subagent's requests resolved with 180000 then 175000 tokens, and the pane is drawn with a 200000-token session window
+- **THEN** its bar line is drawn in the `error` colour and reads `88% · 175k/200k · 2 req · peak 180k`
 
 #### Scenario: The pane says so before the first response
 - **WHEN** the pane is drawn and `$.session.usage()` returns no breakdown
