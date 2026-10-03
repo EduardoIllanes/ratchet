@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { agentsTail, agentWindow, bar, cells, compact, inputTokens, reached, recordStep, statusLine } from '../meter'
+import { agentsTail, bar, cells, compact, inputTokens, reached, recordStep, statusLine } from '../meter'
 
 const WINDOW = 200_000
 
@@ -34,11 +34,6 @@ describe('meter', () => {
     expect(
       inputTokens({ input_tokens: 10, output_tokens: 99, cache_read_input_tokens: 1_000, cache_creation_input_tokens: 200 }),
     ).toBe(1_210)
-  })
-
-  test('assumes a 200k subagent window until an agent goes past it', () => {
-    expect(agentWindow(150_000)).toBe(200_000)
-    expect(agentWindow(250_000)).toBe(1_000_000)
   })
 
   test('folds subagent requests, keeping the peak and the most recent twenty', () => {

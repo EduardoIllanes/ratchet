@@ -10,14 +10,6 @@ export function inputTokens(usage: ModelUsage): number {
   return usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
 }
 
-/**
- * The window a subagent most likely runs in. The engine reports no window per
- * model, so assume the standard 200k unless the agent has already gone past it.
- */
-export function agentWindow(tokens: number): number {
-  return tokens > 200_000 ? 1_000_000 : 200_000
-}
-
 /** Folds one request of a subagent into the readings, keeping the most recent few. */
 export function recordStep(
   agents: Record<string, AgentReading>,

@@ -3,7 +3,6 @@ import type { EngineInterface, Register, SessionContextUsage } from 'claude-code
 
 import type { AgentReading } from './types'
 import {
-  agentWindow,
   agentsTail,
   cells,
   compact,
@@ -147,7 +146,7 @@ export const register: Register = on => {
     // Read to subscribe: each new reading redraws the pane.
     await read($, reading)
     const readings = await read($, agents)
-    const { breakdown } = (await $.session.usage({ breakdown: 'summary' })).context
+    const { breakdown, window: sessionWindow } = (await $.session.usage({ breakdown: 'summary' })).context
 
     if (breakdown === undefined) {
       return <Text dimColor>No breakdown yet: it arrives with the first response.</Text>
@@ -192,13 +191,29 @@ export const register: Register = on => {
         )}
         {recent.length > 0 && <Text bold>Subagents</Text>}
         {recent.map(([id, one]) => {
-          const percent = Math.round((one.tokens / agentWindow(one.peak)) * 100)
+          const live = isRunning.has(id)
+          const window = Math.max(sessionWindow, one.peak)
+          const percent = Math.round((one.tokens / window) * 100)
+          const numbers =
+            ` ${percent}% · ${compact(one.tokens)}/${compact(window)} · ${one.steps} req` +
+            (one.peak > one.tokens ? ` · peak ${compact(one.peak)}` : '')
+          const room = Math.max(6, Math.min(20, e.props.bodyColumns - 2 - numbers.length))
+          const filled = Math.max(0, Math.min(room, Math.round((percent * room) / 100)))
+          const tone = percent >= 85 ? 'error' : percent >= 70 ? 'warning' : 'success'
           return (
-            <Text dimColor={!isRunning.has(id)} wrap="truncate-end">
-              {isRunning.has(id) ? '● ' : '○ '}
-              {one.type ?? 'agent'} · {compact(one.tokens)} ~{percent}% · peak {compact(one.peak)} · {one.steps} req ·{' '}
-              {one.description ?? ''}
-            </Text>
+            <Box flexDirection="column">
+              <Text dimColor={!live} wrap="truncate-end">
+                {live ? '● ' : '○ '}
+                {one.type} {one.description}
+              </Text>
+              <Box flexDirection="row">
+                <Text>{'  '}</Text>
+                <Text color={tone} dimColor={!live}>
+                  {'█'.repeat(filled) + '░'.repeat(room - filled)}
+                </Text>
+                <Text dimColor={!live}>{numbers}</Text>
+              </Box>
+            </Box>
           )
         })}
       </Box>
