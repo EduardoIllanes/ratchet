@@ -20,6 +20,10 @@ reviewer). Everything is enforced by hooks and one small binary, not by prompt t
   handoff, orphaned tasks, and up to five ready to take. One line per prompt after that.
 - **Local PDF extraction** (`ratchet pdf`) through the `liteparse` CLI, with automatic OCR
   retry and output kept out of the terminal.
+- **A context meter.** In a repo that opted in, the status line shows how full the main context
+  window is, a toast fires at 70% and 85%, and `/ctx` opens a pane with the breakdown by
+  category and every subagent's window. It is a function-hook module, so it needs a Claude Code
+  with function-hook modules (tested against 2.1.288); older versions run the plugin without it.
 - **Agent roles, skills and commands.** Seven agent profiles, the `ratchet-tasks` and
   `ratchet-pdf` skills, the `/opsx:*` OpenSpec commands, `/ratchet:init` and `/ratchet:map`.
 
