@@ -312,7 +312,25 @@ test('The pane lists subagents with their fill', async ($, on) => {
     const ui = await mountPane($, surface)
     expect(
       await ui.find({
-        text: /ratchet:reader · 50k ~25% · peak 50k · 1 req · Read the big file/,
+        text: /● ratchet:reader · 50k ~25% · peak 50k · 1 req · Read the big file/,
+      }),
+    ).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('A finished subagent stays in the pane', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.agents = [AGENT1]
+  await start($)
+  await request($, 'agent-1')
+  r.agents = []
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(
+      await ui.find({
+        text: /○ ratchet:reader · 50k ~25% · peak 50k · 1 req · Read the big file/,
       }),
     ).toBeDefined()
     await ui.unmount()

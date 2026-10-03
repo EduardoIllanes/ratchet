@@ -142,6 +142,11 @@ fn context_meter__the_pane_lists_subagents_with_their_fill() {
 }
 
 #[test]
+fn context_meter__a_finished_subagent_stays_in_the_pane() {
+    assert_passed("A finished subagent stays in the pane");
+}
+
+#[test]
 fn context_meter__the_pane_says_so_before_the_first_response() {
     assert_passed("The pane says so before the first response");
 }
