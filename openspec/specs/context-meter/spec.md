@@ -18,8 +18,8 @@ writes nothing to disk. It runs only in repos that opted in to ratchet.
 `hooks/hooks.json` SHALL keep its command hooks and SHALL also name the module under
 `"modules": ["./context-meter/register.tsx"]`; `.claude-plugin/plugin.json` SHALL name the
 module's state contract under `"types"` and SHALL still carry no `version`. The module's state
-SHALL live under `PluginState['ratchet']`. `claude plugin validate` on the repository root SHALL
-pass. Every scenario of this spec but this requirement's SHALL be a test of the module under
+SHALL live under `PluginState['ratchet']`. `claude plugin validate .claude-plugin/plugin.json`
+SHALL pass (on the repository root it validates only `marketplace.json`). Every scenario of this spec but this requirement's SHALL be a test of the module under
 `claude plugin test`, named exactly as the scenario, and its Rust spec function SHALL assert
 that `claude plugin test` on the repository root printed `(pass) <scenario title>`. With no
 `claude` on the path those Rust functions SHALL fail naming
@@ -27,7 +27,7 @@ that `claude plugin test` on the repository root printed `(pass) <scenario title
 which CI SHALL install before `cargo test` on every platform.
 
 #### Scenario: The plugin validates with the module declared
-- **WHEN** `claude plugin validate` runs on the repository root
+- **WHEN** `claude plugin validate` runs on the repository's `.claude-plugin/plugin.json`
 - **THEN** it exits 0, and its output names the module's hooks `session.start`,
   `session.measure`, `turn.step` and `ui.render` for the `Pane` component
 
