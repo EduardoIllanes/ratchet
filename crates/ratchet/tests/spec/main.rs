@@ -5,6 +5,7 @@
 mod agent_protocol;
 mod board;
 mod bootstrap;
+mod context_meter;
 mod map;
 mod pdf;
 mod sessions;

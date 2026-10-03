@@ -3,5 +3,6 @@
   "description": "Guardrails, task board and spec-driven agent roles for Claude Code, enforced by hooks instead of prompts.",
   "author": { "name": "ratchet contributors" },
   "license": "MIT",
-  "keywords": ["guardrails", "hooks", "tasks", "spec-driven", "agents"]
+  "keywords": ["guardrails", "hooks", "tasks", "spec-driven", "agents"],
+  "types": "./hooks/context-meter/types.d.ts"
 }
