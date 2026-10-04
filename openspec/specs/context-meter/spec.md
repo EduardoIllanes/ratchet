@@ -249,8 +249,9 @@ messages there SHALL be no such section.
 - **THEN** it lists `Read` with `1k` and `work/repo/README.md`, and no line naming `ratchet:reader`
 
 ### Requirement: The pane shows what the held task has cost so far
-In an opted-in session the module SHALL read the held task's tokens on `session.start`, every
-60 seconds after it, and on `/ctx`, without any hook waiting for it: it SHALL run the plugin's
+In an opted-in session the module SHALL read the held task's tokens on `session.start` and on
+each `/ctx`, and at no other time — a report past the output cap leaves a file under
+`~/.ratchet/out` on every read — without any hook waiting for it: it SHALL run the plugin's
 own binary — `<$.plugin.root>/bin/ratchet.exe` when `$.fs.stat` resolves it with `kind: 'file'`,
 else `<$.plugin.root>/bin/ratchet` — as `task list --mine --json --session <$.session.id()>`,
 take the first task whose `status` is `in_progress`, and run `usage <id> --json`. Both commands

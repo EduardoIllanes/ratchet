@@ -77,7 +77,10 @@ async function fullOutput($: EngineInterface, stdout: string): Promise<string> {
   return path === null ? stdout : await $.fs.read(path)
 }
 
-/** Reads what the held task has cost so far; off the hot path, from a timer or /ctx. */
+/**
+ * Reads what the held task has cost so far; off the hot path, on session start and /ctx only:
+ * a report past ratchet's output cap leaves a file under ~/.ratchet/out on every read.
+ */
 async function refreshTask($: EngineInterface): Promise<void> {
   try {
     const ratchet = await binary($)
@@ -155,9 +158,8 @@ export const register: Register = on => {
             immediate: true,
           })
           .catch(() => undefined)
-        await show($, (await $.session.usage()).context)
         void refreshTask($)
-        $.clock.every(60_000, () => void refreshTask($))
+        await show($, (await $.session.usage()).context)
       }
     } catch {
       // The meter never fails the session.
