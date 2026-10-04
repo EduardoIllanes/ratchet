@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { agentsTail, bar, cells, compact, inputTokens, reached, recordStep, statusLine } from '../meter'
+import { agentsTail, bar, categoryColors, fillColor, lastDelta, pushHistory, shortType, sparkline, taskCost, topConsumers, turnsToCompact, cells, compact, inputTokens, reached, recordStep, statusLine } from '../meter'
 
 const WINDOW = 200_000
 
@@ -10,6 +10,8 @@ describe('meter', () => {
     expect(compact(84_400)).toBe('84k')
     expect(compact(1_000_000)).toBe('1M')
     expect(compact(1_240_000)).toBe('1.2M')
+    expect(compact(999_600)).toBe('1M')
+    expect(compact(1_040_000)).toBe('1M')
   })
 
   test('draws a bar clamped to its width', () => {
@@ -46,15 +48,73 @@ describe('meter', () => {
     expect(agents['a']).toBeUndefined()
   })
 
+  test('keeps the agent just updated when others tie on time', () => {
+    let agents: ReturnType<typeof recordStep> = {}
+    for (let i = 0; i < 21; i++) agents = recordStep(agents, `x${i}`, 1, 'm', 5)
+    expect(Object.keys(agents).length).toBe(20)
+    expect(agents['x20']).toBeDefined()
+  })
+
   test('tails the status line with the running subagents', () => {
     const one = { tokens: 120_000, peak: 120_000, steps: 3, model: 'm', at: 0, type: 't', description: 'd' }
-    expect(agentsTail([])).toBe('')
-    expect(agentsTail([one])).toBe(' · 1 agent (max 120k)')
-    expect(agentsTail([one, { ...one, tokens: 40_000 }])).toBe(' · 2 agents (max 120k)')
+    const types = ['ratchet:reader', 'Explore', 'ratchet:implementer', 'general-purpose']
+    const four = [20_000, 60_000, 160_000, 100_000].map((tokens, i) => ({ ...one, tokens, peak: tokens, type: types[i]! }))
+    expect(agentsTail([], WINDOW)).toBe('')
+    expect(agentsTail([{ ...one, tokens: 50_000, peak: 50_000, type: 'ratchet:implementer' }], WINDOW)).toBe(
+      ' │ implementer █░░░░ 25%',
+    )
+    expect(agentsTail(four, WINDOW)).toBe(
+      ' │ implementer ████░ 80% · general-purpose ███░░ 50% · Explore ██░░░ 30% +1',
+    )
   })
 
   test('says when there is no reading yet', () => {
     expect(statusLine({ tokens: null, percent: null, window: WINDOW })).toBe('ctx ░░░░░░░░░░ –/200k')
   })
-})
 
+  test('strips a plugin prefix and colours by role', () => {
+    expect(shortType('ratchet:reader')).toBe('reader')
+    expect(shortType('Explore')).toBe('Explore')
+    expect(fillColor(69)).toBe('#29D398')
+    expect(fillColor(70)).toBe('#FAB795')
+    expect(fillColor(85)).toBe('#E95678')
+    expect(categoryColors(['used', 'buffer', 'used', 'free'])).toEqual(['#26BBD9', '#6C6F93', '#B877DB', '#6C6F93'])
+  })
+
+  test('keeps sixty turns, shows the last move and draws a sparkline', () => {
+    expect(pushHistory(Array.from({ length: 60 }, (_, i) => i), 99).length).toBe(60)
+    expect(lastDelta([40_000])).toBe('')
+    expect(lastDelta([40_000, 52_000])).toBe(' +12k')
+    expect(lastDelta([52_000, 22_000])).toBe(' -30k')
+    expect(lastDelta([5, 5])).toBe('')
+    expect(sparkline([40_000, 50_000, 60_000, 70_000], WINDOW, 40)).toBe('▂▃▃▃')
+  })
+
+  test('forecasts the turns to auto-compaction from the pace since the last shrink', () => {
+    expect(turnsToCompact([40_000, 50_000, 60_000, 70_000], 167_000)).toBe(10)
+    expect(turnsToCompact([100_000, 150_000, 60_000, 70_000], 167_000)).toBe(10)
+    expect(turnsToCompact([60_000, 60_000], 167_000)).toBeNull()
+    expect(turnsToCompact([100_000, 170_000], 167_000)).toBe(0)
+  })
+
+  test('ranks tool results and sums the held task by role', () => {
+    const use = (tool: string, input: Record<string, unknown>, chars: number) => ({ tool, input, text: 'x'.repeat(chars) })
+    const top = topConsumers([{ toolUses: [use('Grep', { pattern: 'p' }, 400), use('Read', { file_path: '/a/b/c/d.rs' }, 40_000)] }], 5)
+    expect(top).toEqual([
+      { tool: 'Read', label: 'b/c/d.rs', tokens: 10_000 },
+      { tool: 'Grep', label: 'p', tokens: 100 },
+    ])
+    const buckets = [
+      { role: 'a', tokens: { input: 1, cache_write: 2, cache_read: 3, output: 4 } },
+      { role: 'b', tokens: { output: 50 } },
+    ]
+    expect(taskCost({ tasks: [{ id: 'T-1', buckets }] }, 'T-1')).toEqual({
+      total: 60,
+      roles: [
+        { role: 'b', tokens: 50 },
+        { role: 'a', tokens: 10 },
+      ],
+    })
+    expect(taskCost({ tasks: [] }, 'T-1')).toBeNull()
+  })
+})
