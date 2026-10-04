@@ -158,7 +158,7 @@ figures change. It SHALL draw on the terminal and the desktop, in the Celestial 
 It SHALL show a header `<percentage>% · <totalTokens> / <rawMaxTokens>`, the percentage in its
 fill colour, followed by the model; a bar of the categories across the pane's width; one row per
 category that is not `deferred` with a mark, its tokens and its share of `rawMaxTokens` to one
-decimal, each `used` category's bar cells and mark in the next series colour and the `buffer`
+decimal, each `used` category's bar cells and mark in the series colours taken from the first and the `buffer`
 and `free` ones in `#6C6F93`; and `auto-compact at <threshold>` when auto-compaction is on.
 With no breakdown yet the pane SHALL say `No breakdown yet`.
 
@@ -257,7 +257,7 @@ or prints what does not parse SHALL leave the last figures as they were.
 
 When figures with more than zero tokens are held, the pane SHALL draw, in `#B877DB`, the task's
 id followed by `· <total> tokens so far`; a bar across the pane's width split among the roles in
-proportion, each role's cells in the next series colour; and a legend of the four largest roles,
+proportion, each role's cells in the series colours taken from the first; and a legend of the four largest roles,
 `<role> <percent>%` joined by ` · `, each in its role's colour, the role with the text up to and
 including the first `:` dropped and `percent = round(tokens / total × 100)`.
 
