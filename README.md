@@ -384,6 +384,15 @@ ported is deliberately not planned for `ratchet` — it stays in `ops`.
 
 ## Status
 
+v0.2.3 — a context meter, in repos that opted in: the status line shows how full the main
+context window is, its move since the last turn and a small bar per running subagent; a toast
+fires at 70% and 85%; and `/ctx` opens a pane with the breakdown by category, the trend with a
+forecast of the turns left before auto-compaction, the heaviest tool results still in the window,
+the held task's tokens by role and every subagent's window. It is a function-hook module tested
+against Claude Code 2.1.288. Also `ratchet usage` no longer double counts: Claude Code writes one
+transcript record per content block of a response, each repeating its usage, and every record was
+summed (totals were roughly twice the real ones); a response now counts once, by `message.id`.
+
 v0.2.2 — `ratchet config init` also appends to the repo's `CLAUDE.md` a block saying when
 dispatching the `reader` and `researcher` agents pays off and when it does not (idempotent, never
 rewrites existing content, skips a `CLAUDE.md` that is not a regular file). Also since v0.2.1: on
