@@ -8,6 +8,7 @@ import {
   bar,
   categoryColors,
   CELESTIAL,
+  cappedPath,
   cells,
   compact,
   fillColor,
@@ -69,6 +70,13 @@ async function binary($: EngineInterface): Promise<string> {
   return `${$.plugin.root}/bin/ratchet`
 }
 
+/** A command's stdout, or the whole output from the file when ratchet capped it. */
+async function fullOutput($: EngineInterface, stdout: string): Promise<string> {
+  const path = cappedPath(stdout)
+
+  return path === null ? stdout : await $.fs.read(path)
+}
+
 /** Reads what the held task has cost so far; off the hot path, from a timer or /ctx. */
 async function refreshTask($: EngineInterface): Promise<void> {
   try {
@@ -78,7 +86,7 @@ async function refreshTask($: EngineInterface): Promise<void> {
       timeoutMs: 15_000,
     })
     if (listed.exitCode !== 0) return
-    const held = (JSON.parse(listed.stdout) as { id: string; title: string; status: string }[]).find(
+    const held = (JSON.parse(await fullOutput($, listed.stdout)) as { id: string; title: string; status: string }[]).find(
       one => one.status === 'in_progress',
     )
     if (held === undefined) {
@@ -87,8 +95,9 @@ async function refreshTask($: EngineInterface): Promise<void> {
     }
     const used = await $.process.run([ratchet, 'usage', held.id, '--json'], { timeoutMs: 30_000 })
     if (used.exitCode !== 0) return
-    const cost = taskCost(JSON.parse(used.stdout), held.id)
-    await update($, task, () => (cost === null ? null : { id: held.id, title: held.title, ...cost }))
+    const cost = taskCost(JSON.parse(await fullOutput($, used.stdout)), held.id)
+    // A report with nothing for the task keeps the last figures.
+    if (cost !== null) await update($, task, () => ({ id: held.id, title: held.title, ...cost }))
   } catch {
     // The meter never fails the session; the pane keeps the last figures.
   }
@@ -170,6 +179,10 @@ export const register: Register = on => {
         // One point per turn: the trend and the status line's move read these.
         const tokens = e.context.tokens
         if (tokens !== undefined) await update($, history, all => pushHistory(all, tokens))
+      } catch {
+        // A failed history must not keep the line from refreshing.
+      }
+      try {
         await show($, e.context)
       } catch {
         // The meter never fails the session.
@@ -226,153 +239,158 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    // Read to subscribe: each new reading redraws the pane.
-    await read($, reading)
-    const readings = await read($, agents)
-    const turns = await read($, history)
-    const held = await read($, task)
-    const said = await $.session.messages().catch(() => [])
-    const consumers = topConsumers(Array.isArray(said) ? said : [], 5)
-    const context = await $.session.usage({ breakdown: 'summary' }).then(
-      usage => usage.context,
-      () => undefined,
-    )
-    const breakdown = context?.breakdown
+    try {
+      // Read to subscribe: each new reading redraws the pane.
+      await read($, reading)
+      const readings = await read($, agents)
+      const turns = await read($, history)
+      const held = await read($, task)
+      const said = await $.session.messages({ as: 'api' }).catch(() => [])
+      const consumers = topConsumers(Array.isArray(said) ? said : [], 5)
+      const context = await $.session.usage({ breakdown: 'summary' }).then(
+        usage => usage.context,
+        () => undefined,
+      )
+      const breakdown = context?.breakdown
 
-    if (context === undefined || breakdown === undefined) {
+      if (context === undefined || breakdown === undefined) {
+        return <Text dimColor>No breakdown yet: it arrives with the first response.</Text>
+      }
+
+      const rows = breakdown.categories.filter(row => row.kind !== 'deferred')
+      const width = Math.max(10, e.props.bodyColumns - 2)
+      const widths = cells(
+        rows.map(row => row.tokens),
+        breakdown.rawMaxTokens,
+        width,
+      )
+      const nameWidth = Math.max(...rows.map(row => row.name.length))
+      const colors = categoryColors(rows.map(row => row.kind))
+      // The agent list drops an agent once it is done; the readings keep who it was.
+      const listed = await $.agent.list().catch(() => [])
+      const isRunning = new Set(listed.filter(agent => agent.status === 'running').map(agent => agent.id))
+      const roleCells = held === null ? [] : cells(held.roles.map(role => role.tokens), held.total, width)
+      const recent = Object.entries(readings).sort(([, a], [, b]) => b.at - a.at)
+
+      return (
+        <Box flexDirection="column">
+          <Text bold>
+            <Text color={fillColor(breakdown.percentage)}>{breakdown.percentage}%</Text> · {compact(breakdown.totalTokens)} /{' '}
+            {compact(breakdown.rawMaxTokens)}
+            <Text dimColor> {breakdown.model}</Text>
+          </Text>
+          <Box flexDirection="row">
+            {rows.map((row, i) => (
+              <Text color={colors[i]} dimColor={row.kind === 'free'}>
+                {(row.kind === 'used' ? '█' : row.kind === 'buffer' ? '▒' : '░').repeat(widths[i] ?? 0)}
+              </Text>
+            ))}
+          </Box>
+          {rows.map((row, i) => (
+            <Box flexDirection="row">
+              <Text color={colors[i]}>{row.kind === 'used' ? '■ ' : '□ '}</Text>
+              <Text dimColor={row.kind !== 'used'}>
+                {row.name.padEnd(nameWidth)} {compact(row.tokens).padStart(5)}{' '}
+                {((row.tokens / breakdown.rawMaxTokens) * 100).toFixed(1).padStart(5)}%
+              </Text>
+            </Box>
+          ))}
+          {breakdown.isAutoCompactEnabled && breakdown.autoCompactThreshold !== undefined && (
+            <Text dimColor>auto-compact at {compact(breakdown.autoCompactThreshold)}</Text>
+          )}
+          {turns.length > 1 && (
+            <Text bold color={CELESTIAL.accent}>
+              Trend
+            </Text>
+          )}
+          {turns.length > 1 && (
+            <Text>
+              <Text color={fillColor(breakdown.percentage)}>{sparkline(turns, context.window, width - lastDelta(turns).length)}</Text>
+              {lastDelta(turns)}
+            </Text>
+          )}
+          {turns.length > 1 && breakdown.autoCompactThreshold !== undefined && (
+            <Text dimColor>
+              {(() => {
+                const left = turnsToCompact(turns, breakdown.autoCompactThreshold)
+                if (left === null) return 'not growing'
+                if (left === 0) return 'at the auto-compact threshold'
+                return `~${left} turn${left === 1 ? '' : 's'} to auto-compact at this pace`
+              })()}
+            </Text>
+          )}
+          {consumers.length > 0 && (
+            <Text bold color={CELESTIAL.accent}>
+              Top consumers
+            </Text>
+          )}
+          {consumers.map((one, i) => (
+            <Box flexDirection="row">
+              <Text color={CELESTIAL.series[i % CELESTIAL.series.length]}>{one.tool.padEnd(6)} </Text>
+              <Text wrap="truncate-end">
+                {compact(one.tokens).padStart(5)} {one.label}{' '}
+              </Text>
+            </Box>
+          ))}
+          {consumers.some(one => one.tool === 'Read' && one.tokens >= 5_000) && (
+            <Text dimColor>→ reads this size can go to ratchet:reader</Text>
+          )}
+          {held !== null && held.total > 0 && (
+            <Text bold color={CELESTIAL.accent}>
+              {held.id} <Text dimColor>· {compact(held.total)} tokens so far</Text>
+            </Text>
+          )}
+          {held !== null && held.total > 0 && (
+            <Box flexDirection="row">
+              {roleCells.map((count, i) => (
+                <Text color={CELESTIAL.series[i % CELESTIAL.series.length]}>{'█'.repeat(count)}</Text>
+              ))}
+            </Box>
+          )}
+          {held !== null && held.total > 0 && (
+            <Text wrap="truncate-end">
+              {held.roles.slice(0, 4).map((role, i) => (
+                <Text color={CELESTIAL.series[i % CELESTIAL.series.length]}>
+                  {i > 0 ? ' · ' : ''}
+                  {shortType(role.role)} {Math.round((role.tokens / held.total) * 100)}%
+                </Text>
+              ))}
+            </Text>
+          )}
+          {recent.length > 0 && (
+            <Text bold color={CELESTIAL.accent}>
+              Subagents
+            </Text>
+          )}
+          {recent.map(([id, one]) => {
+            const isLive = isRunning.has(id)
+            const window = agentWindow(one.peak, context.window)
+            const percent = Math.round((one.tokens / window) * 100)
+            const peak = one.peak > one.tokens ? ` · peak ${compact(one.peak)}` : ''
+            const numbers = ` ${percent}% · ${compact(one.tokens)}/${compact(window)} · ${one.steps} req${peak}`
+            const room = Math.max(6, Math.min(20, e.props.bodyColumns - 2 - numbers.length))
+            return (
+              <Box flexDirection="column">
+                <Text dimColor={!isLive} wrap="truncate-end">
+                  {isLive ? '● ' : '○ '}
+                  <Text bold>{one.type}</Text>
+                  {one.description ? `  ${one.description}` : ''}
+                </Text>
+                <Box flexDirection="row">
+                  <Text>{'  '}</Text>
+                  <Text color={fillColor(percent)} dimColor={!isLive}>
+                    {bar(percent, room)}
+                  </Text>
+                  <Text dimColor={!isLive}>{numbers}</Text>
+                </Box>
+              </Box>
+            )
+          })}
+        </Box>
+      )
+    } catch {
+      // Whatever fails while drawing, the pane still says something.
       return <Text dimColor>No breakdown yet: it arrives with the first response.</Text>
     }
-
-    const rows = breakdown.categories.filter(row => row.kind !== 'deferred')
-    const width = Math.max(10, e.props.bodyColumns - 2)
-    const widths = cells(
-      rows.map(row => row.tokens),
-      breakdown.rawMaxTokens,
-      width,
-    )
-    const nameWidth = Math.max(...rows.map(row => row.name.length))
-    const colors = categoryColors(rows.map(row => row.kind))
-    // The agent list drops an agent once it is done; the readings keep who it was.
-    const listed = await $.agent.list().catch(() => [])
-    const isRunning = new Set(listed.filter(agent => agent.status === 'running').map(agent => agent.id))
-    const roleCells = held === null ? [] : cells(held.roles.map(role => role.tokens), held.total, width)
-    const recent = Object.entries(readings).sort(([, a], [, b]) => b.at - a.at)
-
-    return (
-      <Box flexDirection="column">
-        <Text bold>
-          <Text color={fillColor(breakdown.percentage)}>{breakdown.percentage}%</Text> · {compact(breakdown.totalTokens)} /{' '}
-          {compact(breakdown.rawMaxTokens)}
-          <Text dimColor> {breakdown.model}</Text>
-        </Text>
-        <Box flexDirection="row">
-          {rows.map((row, i) => (
-            <Text color={colors[i]} dimColor={row.kind === 'free'}>
-              {(row.kind === 'used' ? '█' : row.kind === 'buffer' ? '▒' : '░').repeat(widths[i] ?? 0)}
-            </Text>
-          ))}
-        </Box>
-        {rows.map((row, i) => (
-          <Box flexDirection="row">
-            <Text color={colors[i]}>{row.kind === 'used' ? '■ ' : '□ '}</Text>
-            <Text dimColor={row.kind !== 'used'}>
-              {row.name.padEnd(nameWidth)} {compact(row.tokens).padStart(5)}{' '}
-              {((row.tokens / breakdown.rawMaxTokens) * 100).toFixed(1).padStart(5)}%
-            </Text>
-          </Box>
-        ))}
-        {breakdown.isAutoCompactEnabled && breakdown.autoCompactThreshold !== undefined && (
-          <Text dimColor>auto-compact at {compact(breakdown.autoCompactThreshold)}</Text>
-        )}
-        {turns.length > 1 && (
-          <Text bold color={CELESTIAL.accent}>
-            Trend
-          </Text>
-        )}
-        {turns.length > 1 && (
-          <Text>
-            <Text color={fillColor(breakdown.percentage)}>{sparkline(turns, context.window, width)}</Text>
-            {lastDelta(turns)}
-          </Text>
-        )}
-        {turns.length > 1 && breakdown.autoCompactThreshold !== undefined && (
-          <Text dimColor>
-            {(() => {
-              const left = turnsToCompact(turns, breakdown.autoCompactThreshold)
-              if (left === null) return 'not growing'
-              if (left === 0) return 'at the auto-compact threshold'
-              return `~${left} turn${left === 1 ? '' : 's'} to auto-compact at this pace`
-            })()}
-          </Text>
-        )}
-        {consumers.length > 0 && (
-          <Text bold color={CELESTIAL.accent}>
-            Top consumers
-          </Text>
-        )}
-        {consumers.map((one, i) => (
-          <Box flexDirection="row">
-            <Text color={CELESTIAL.series[i % CELESTIAL.series.length]}>{one.tool.padEnd(6)} </Text>
-            <Text wrap="truncate-end">
-              {compact(one.tokens).padStart(5)} {one.label}{' '}
-            </Text>
-          </Box>
-        ))}
-        {consumers.some(one => one.tool === 'Read' && one.tokens >= 5_000) && (
-          <Text dimColor>→ reads this size can go to ratchet:reader</Text>
-        )}
-        {held !== null && held.total > 0 && (
-          <Text bold color={CELESTIAL.accent}>
-            {held.id} <Text dimColor>· {compact(held.total)} tokens so far</Text>
-          </Text>
-        )}
-        {held !== null && held.total > 0 && (
-          <Box flexDirection="row">
-            {roleCells.map((count, i) => (
-              <Text color={CELESTIAL.series[i % CELESTIAL.series.length]}>{'█'.repeat(count)}</Text>
-            ))}
-          </Box>
-        )}
-        {held !== null && held.total > 0 && (
-          <Text wrap="truncate-end">
-            {held.roles.slice(0, 4).map((role, i) => (
-              <Text color={CELESTIAL.series[i % CELESTIAL.series.length]}>
-                {i > 0 ? ' · ' : ''}
-                {shortType(role.role)} {Math.round((role.tokens / held.total) * 100)}%
-              </Text>
-            ))}
-          </Text>
-        )}
-        {recent.length > 0 && (
-          <Text bold color={CELESTIAL.accent}>
-            Subagents
-          </Text>
-        )}
-        {recent.map(([id, one]) => {
-          const isLive = isRunning.has(id)
-          const window = agentWindow(one.peak, context.window)
-          const percent = Math.round((one.tokens / window) * 100)
-          const peak = one.peak > one.tokens ? ` · peak ${compact(one.peak)}` : ''
-          const numbers = ` ${percent}% · ${compact(one.tokens)}/${compact(window)} · ${one.steps} req${peak}`
-          const room = Math.max(6, Math.min(20, e.props.bodyColumns - 2 - numbers.length))
-          return (
-            <Box flexDirection="column">
-              <Text dimColor={!isLive} wrap="truncate-end">
-                {isLive ? '● ' : '○ '}
-                <Text bold>{one.type}</Text>
-                {one.description ? `  ${one.description}` : ''}
-              </Text>
-              <Box flexDirection="row">
-                <Text>{'  '}</Text>
-                <Text color={fillColor(percent)} dimColor={!isLive}>
-                  {bar(percent, room)}
-                </Text>
-                <Text dimColor={!isLive}>{numbers}</Text>
-              </Box>
-            </Box>
-          )
-        })}
-      </Box>
-    )
   })
 }

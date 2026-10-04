@@ -209,17 +209,45 @@ export function toolLabel(tool: string, input: Record<string, unknown>): string 
 
 export type Consumer = { tool: string; label: string; tokens: number }
 
-/** The heaviest tool results in the conversation, largest first. */
-export function topConsumers(
-  messages: readonly { toolUses: readonly { tool: string; input: Record<string, unknown>; text?: string }[] }[],
-  count: number,
-): Consumer[] {
-  return messages
-    .flatMap(message => message.toolUses)
-    .filter(use => use.text !== undefined)
-    .map(use => ({ tool: use.tool, label: toolLabel(use.tool, use.input), tokens: estimateTokens(use.text ?? '') }))
+type ApiBlock = { type: string; [field: string]: unknown }
+
+/** A tool result's text: its content when a string, else its text blocks joined. */
+function resultText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+
+  return (content as ApiBlock[])
+    .filter(block => block.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text as string)
+    .join('')
+}
+
+/** The heaviest tool results among Messages API messages, largest first. */
+export function topConsumers(messages: readonly { role: string; content: readonly ApiBlock[] }[], count: number): Consumer[] {
+  const blocks = messages.flatMap(message => (Array.isArray(message.content) ? message.content : []))
+  const uses = new Map<string, { name: string; input: Record<string, unknown> }>()
+  for (const block of blocks) {
+    if (block.type === 'tool_use' && typeof block.id === 'string') {
+      uses.set(block.id, { name: String(block.name), input: (block.input ?? {}) as Record<string, unknown> })
+    }
+  }
+
+  return blocks
+    .flatMap(block => {
+      const use = block.type === 'tool_result' ? uses.get(String(block.tool_use_id)) : undefined
+      if (use === undefined) return []
+      return [{ tool: use.name, label: toolLabel(use.name, use.input), tokens: estimateTokens(resultText(block.content)) }]
+    })
     .sort((a, b) => b.tokens - a.tokens)
     .slice(0, count)
+}
+
+/** The path a capped output names: its last non-empty line reads `… (<n> lines in <path>)`. */
+export function cappedPath(stdout: string): string | null {
+  const lines = stdout.trimEnd().split('\n')
+  const match = /^… \(\d+ lines in (.+)\)$/.exec(lines.at(-1) ?? '')
+
+  return match?.[1] ?? null
 }
 
 /** Sums `ratchet usage <id> --json`'s buckets by role, input to output (thinking is inside output). */
