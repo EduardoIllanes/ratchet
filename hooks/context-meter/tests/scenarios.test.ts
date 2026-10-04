@@ -1,6 +1,6 @@
 // Scenario tests of the context-meter module (openspec/specs/context-meter/spec.md).
 // One test per scenario, named exactly as the scenario; run by `claude plugin test`.
-import type { ContextCategory, On, SessionContextBreakdown, SessionMessage } from 'claude-code'
+import type { ContextCategory, On, SessionContextBreakdown } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -21,7 +21,9 @@ type Rig = {
   stepTokens?: number
   agentsFail: boolean
   registerFails: boolean
-  messages: SessionMessage[]
+  messages: unknown[]
+  usageStdout?: string
+  reads: Record<string, string>
   messagesFail: boolean
   tasks: { id: string; title: string; status: string }[]
   usageJson: unknown
@@ -49,6 +51,7 @@ function rig(on: On, o: { files?: string[]; dirs?: string[] } = {}): Rig {
     agentsFail: false,
     registerFails: false,
     messages: [],
+    reads: {},
     messagesFail: false,
     tasks: [],
     usageJson: { tasks: [] },
@@ -83,7 +86,14 @@ function rig(on: On, o: { files?: string[]; dirs?: string[] } = {}): Rig {
   })
   on('agent.list', () => (r.agentsFail ? { deny: 'agents unavailable' } : { value: r.agents }))
   on('session.id', () => ({ value: 'sess-1' }))
-  on('session.messages', () => (r.messagesFail ? { deny: 'messages unavailable' } : { value: r.messages }))
+  // The module reads the Messages API form: `{ as: 'api' }`.
+  on('session.messages', () =>
+    r.messagesFail ? { deny: 'messages unavailable' } : { value: r.messages as never },
+  )
+  on('fs.read', (_$, e) => {
+    const text = r.reads[e.path]
+    return text === undefined ? { deny: 'ENOENT' } : { value: text }
+  })
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('process.run', (_$, e) => {
@@ -91,7 +101,7 @@ function rig(on: On, o: { files?: string[]; dirs?: string[] } = {}): Rig {
     const done = (exitCode: number, stdout: string) => ({
       value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
     })
-    if (e.argv.includes('usage')) return done(r.usageExit, JSON.stringify(r.usageJson))
+    if (e.argv.includes('usage')) return done(r.usageExit, r.usageStdout ?? JSON.stringify(r.usageJson))
     return done(0, JSON.stringify(r.tasks))
   })
   on('ui.status', (_$, e) => {
@@ -294,14 +304,28 @@ const tokensOf = (bucket: Record<string, number>, role: string) => ({
 })
 const inProgress = (id: string) => ({ id, title: 'a task', status: 'in_progress' })
 
-const toolUse = (tool: string, input: Record<string, unknown>, chars: number, i: number) => ({
-  tool_use_id: `tu-${i}`,
-  tool,
+type Use = { name: string; input: Record<string, unknown>; chars: number; id: string }
+const toolUse = (name: string, input: Record<string, unknown>, chars: number, i: number): Use => ({
+  name,
   input,
-  text: 'x'.repeat(chars),
+  chars,
+  id: `tu-${i}`,
 })
-const withUses = (...uses: ReturnType<typeof toolUse>[]): SessionMessage[] => [
-  { role: 'assistant', text: '', toolUses: uses },
+// The Messages API form: tool_use blocks, then their tool_result blocks. Odd results carry
+// their text as text blocks, even ones as a string.
+const withUses = (...uses: Use[]): unknown[] => [
+  {
+    role: 'assistant',
+    content: uses.map(u => ({ type: 'tool_use', id: u.id, name: u.name, input: u.input })),
+  },
+  {
+    role: 'user',
+    content: uses.map((u, i) => ({
+      type: 'tool_result',
+      tool_use_id: u.id,
+      content: i % 2 === 0 ? 'x'.repeat(u.chars) : [{ type: 'text', text: 'x'.repeat(u.chars) }],
+    })),
+  },
 ]
 
 test('Without ratchet.toml the meter stays silent', async ($, on) => {
@@ -748,6 +772,32 @@ test('Without a held task the pane shows no task cost', async ($, on) => {
   }
 })
 
+const REPORT_PATH = '/home/u/.ratchet/out/20261004T143413-usage-T-0099.txt'
+const longReport = () => {
+  for (let n = 0; n < 100; n++) {
+    const text = JSON.stringify({ ...T99, notes: Array.from({ length: n }, (_, i) => `n${i}`) }, null, 2)
+    if (text.split('\n').length === 70) return text
+  }
+  throw new Error('no 70-line report')
+}
+
+test('A long report is read from the file its last line names', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.tasks = [inProgress('T-0099')]
+  const report = longReport()
+  r.reads[REPORT_PATH] = report
+  r.usageStdout = `${report.split('\n').slice(0, 20).join('\n')}\n… (70 lines in ${REPORT_PATH})\n`
+  await start($)
+  await ctxCommand($)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /T-0099\s*·\s*100k tokens so far/ })).toBeDefined()
+    expect(await ui.find({ text: /implementer 60% · orchestrator 30% · reviewer 10%/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
 test('A failed refresh keeps the last figures', async ($, on) => {
   const r = rig(on)
   r.breakdown = BREAKDOWN
@@ -832,6 +882,36 @@ test('A failing read still draws the pane', async ($, on) => {
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
     expect(await ui.find({ text: /No breakdown yet/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test("A failing agent list still records a subagent's request", async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.agents = [AGENT1]
+  r.agentsFail = true
+  await start($)
+  await request($, 'agent-1')
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /○ agent/ })).toBeDefined()
+    const bar = barProps(await ui.drawn(), /25% · 50k\/200k · 1 req$/)
+    expect(bar?.dimColor).toBe(true)
+    await ui.unmount()
+  }
+})
+
+test('A failing messages read draws the pane without top consumers', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.messages = withUses(toolUse('Read', { file_path: '/work/repo/a.rs' }, 40000, 1))
+  r.messagesFail = true
+  await start($)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /43% · 86k \/ 200k/ })).toBeDefined()
+    expect(await ui.find({ text: /Top consumers/ })).toBeUndefined()
     await ui.unmount()
   }
 })

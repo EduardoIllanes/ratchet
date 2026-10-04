@@ -260,3 +260,18 @@ fn context_meter__a_failing_command_registration_still_meters_the_session() {
 fn context_meter__a_failing_read_still_draws_the_pane() {
     assert_passed("A failing read still draws the pane");
 }
+
+#[test]
+fn context_meter__a_long_report_is_read_from_the_file_its_last_line_names() {
+    assert_passed("A long report is read from the file its last line names");
+}
+
+#[test]
+fn context_meter__a_failing_agent_list_still_records_a_subagent_s_request() {
+    assert_passed("A failing agent list still records a subagent's request");
+}
+
+#[test]
+fn context_meter__a_failing_messages_read_draws_the_pane_without_top_consumers() {
+    assert_passed("A failing messages read draws the pane without top consumers");
+}
