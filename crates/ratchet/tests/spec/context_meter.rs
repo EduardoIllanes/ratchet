@@ -70,6 +70,7 @@ fn context_meter__the_plugin_validates_with_the_module_declared() {
     for needle in [
         "session.start",
         "session.measure",
+        "session.end",
         "turn.step",
         "ui.render{component=Pane",
     ] {
@@ -151,8 +152,8 @@ fn context_meter__a_finished_subagent_stays_in_the_pane() {
 }
 
 #[test]
-fn context_meter__a_subagent_past_most_of_its_window_is_drawn_in_the_error_colour_with_its_peak() {
-    assert_passed("A subagent past most of its window is drawn in the error colour with its peak");
+fn context_meter__a_subagent_past_most_of_its_window_is_drawn_in_the_hot_colour_with_its_peak() {
+    assert_passed("A subagent past most of its window is drawn in the hot colour with its peak");
 }
 
 #[test]
@@ -163,4 +164,99 @@ fn context_meter__the_pane_says_so_before_the_first_response() {
 #[test]
 fn context_meter__a_failing_reading_never_fails_a_model_request() {
     assert_passed("A failing reading never fails a model request");
+}
+
+#[test]
+fn context_meter__counts_that_round_to_a_thousand_k_are_written_in_m() {
+    assert_passed("Counts that round to a thousand k are written in M");
+}
+
+#[test]
+fn context_meter__each_turn_s_move_follows_the_fill() {
+    assert_passed("Each turn's move follows the fill");
+}
+
+#[test]
+fn context_meter__past_three_running_subagents_the_tail_counts_the_rest() {
+    assert_passed("Past three running subagents the tail counts the rest");
+}
+
+#[test]
+fn context_meter__the_agent_just_updated_is_kept_when_twenty_share_its_time() {
+    assert_passed("The agent just updated is kept when twenty share its time");
+}
+
+#[test]
+fn context_meter__clear_forgets_the_subagents_and_the_trend() {
+    assert_passed("/clear forgets the subagents and the trend");
+}
+
+#[test]
+fn context_meter__the_pane_colours_the_breakdown_in_the_celestial_palette() {
+    assert_passed("The pane colours the breakdown in the Celestial palette");
+}
+
+#[test]
+fn context_meter__the_pane_draws_the_trend_and_the_turns_left() {
+    assert_passed("The pane draws the trend and the turns left");
+}
+
+#[test]
+fn context_meter__a_shrunk_window_restarts_the_pace() {
+    assert_passed("A shrunk window restarts the pace");
+}
+
+#[test]
+fn context_meter__a_flat_window_is_not_growing() {
+    assert_passed("A flat window is not growing");
+}
+
+#[test]
+fn context_meter__the_pane_names_the_heaviest_tool_results() {
+    assert_passed("The pane names the heaviest tool results");
+}
+
+#[test]
+fn context_meter__only_the_five_heaviest_tool_results_are_listed() {
+    assert_passed("Only the five heaviest tool results are listed");
+}
+
+#[test]
+fn context_meter__a_read_under_5k_tokens_brings_no_reader_hint() {
+    assert_passed("A read under 5k tokens brings no reader hint");
+}
+
+#[test]
+fn context_meter__the_pane_shows_what_the_held_task_has_cost_by_role() {
+    assert_passed("The pane shows what the held task has cost by role");
+}
+
+#[test]
+fn context_meter__on_windows_the_binary_is_ratchet_exe() {
+    assert_passed("On Windows the binary is ratchet.exe");
+}
+
+#[test]
+fn context_meter__without_a_held_task_the_pane_shows_no_task_cost() {
+    assert_passed("Without a held task the pane shows no task cost");
+}
+
+#[test]
+fn context_meter__a_failed_refresh_keeps_the_last_figures() {
+    assert_passed("A failed refresh keeps the last figures");
+}
+
+#[test]
+fn context_meter__a_failing_agent_list_leaves_the_line_without_its_tail() {
+    assert_passed("A failing agent list leaves the line without its tail");
+}
+
+#[test]
+fn context_meter__a_failing_command_registration_still_meters_the_session() {
+    assert_passed("A failing command registration still meters the session");
+}
+
+#[test]
+fn context_meter__a_failing_read_still_draws_the_pane() {
+    assert_passed("A failing read still draws the pane");
 }

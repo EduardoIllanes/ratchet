@@ -1,6 +1,6 @@
 // Scenario tests of the context-meter module (openspec/specs/context-meter/spec.md).
 // One test per scenario, named exactly as the scenario; run by `claude plugin test`.
-import type { ContextCategory, On, SessionContextBreakdown } from 'claude-code'
+import type { ContextCategory, On, SessionContextBreakdown, SessionMessage } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -19,6 +19,16 @@ type Rig = {
   files: string[]
   dirs: string[]
   stepTokens?: number
+  agentsFail: boolean
+  registerFails: boolean
+  messages: SessionMessage[]
+  messagesFail: boolean
+  tasks: { id: string; title: string; status: string }[]
+  usageJson: unknown
+  usageExit: number
+  runs: string[][]
+  root: string
+  windows: boolean
 }
 
 const fileStat = { kind: 'file', size: 1, mtimeMs: 0, isLink: false } as const
@@ -37,15 +47,28 @@ function rig(on: On, o: { files?: string[]; dirs?: string[] } = {}): Rig {
     agents: [],
     files: o.files ?? ['/work/repo/ratchet.toml'],
     dirs: o.dirs ?? [],
+    agentsFail: false,
+    registerFails: false,
+    messages: [],
+    messagesFail: false,
+    tasks: [],
+    usageJson: { tasks: [] },
+    usageExit: 0,
+    runs: [],
+    root: '',
+    windows: false,
   }
   mock.clock(on)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('fs.stat', (_$, e) => {
+    r.root = _$.plugin.root
+    if (r.windows && e.path.endsWith('/bin/ratchet.exe')) return { value: fileStat }
     if (r.files.includes(e.path)) return { value: fileStat }
     if (r.dirs.includes(e.path)) return { value: dirStat }
     return { deny: 'ENOENT' }
   })
   on('command.register', (_$, e) => {
+    if (r.registerFails) return { deny: 'register unavailable' }
     r.commands.push(e.name)
     return { value: undefined } as never
   })
@@ -61,7 +84,20 @@ function rig(on: On, o: { files?: string[]; dirs?: string[] } = {}): Rig {
       },
     }
   })
-  on('agent.list', () => ({ value: r.agents }))
+  on('agent.list', () => (r.agentsFail ? { deny: 'agents unavailable' } : { value: r.agents }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.messages', () => (r.messagesFail ? { deny: 'messages unavailable' } : { value: r.messages }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('process.run', (_$, e) => {
+    r.root = _$.plugin.root
+    r.runs.push([...e.argv])
+    const done = (exitCode: number, stdout: string) => ({
+      value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+    })
+    if (e.argv.includes('usage')) return done(r.usageExit, JSON.stringify(r.usageJson))
+    return done(0, JSON.stringify(r.tasks))
+  })
   on('ui.status', (_$, e) => {
     r.statuses.push(e.text)
     return { value: undefined }
@@ -204,6 +240,68 @@ const AGENT1: Agent = {
   type: 'ratchet:reader',
   status: 'running',
 }
+const IMPLEMENTER: Agent = { ...AGENT1, type: 'ratchet:implementer' }
+
+declare const setTimeout: (fn: () => void, ms: number) => unknown
+const settle = () => new Promise<void>(done => setTimeout(done, 25))
+
+const ctxCommand = async ($: Engine) => {
+  await $.command.run({
+    command: 'ctx',
+    args: '',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 80 },
+  })
+  await settle()
+}
+
+const sess = (reason: 'clear' | 'other') => ({
+  reason,
+  sessionId: 'sess-1',
+  resume: { id: 'sess-1' },
+})
+
+const endSession = ($: Engine, reason: 'clear' | 'other' = 'clear') => $.session.end(sess(reason))
+
+const node = (n: unknown): Node => n as Node
+const all = (tree: unknown): Node[] => {
+  const out: Node[] = []
+  const walk = (n: unknown) => {
+    if (typeof n === 'string') return
+    out.push(node(n))
+    for (const c of node(n).children ?? []) walk(c)
+  }
+  walk(tree)
+  return out
+}
+// The deepest element whose text matches (none of its children's does as a whole).
+const deepest = (tree: unknown, re: RegExp): Node | undefined => {
+  const hits = all(tree).filter(n => re.test(textOf(n)))
+  return hits.find(n => !(n.children ?? []).some(c => typeof c !== 'string' && re.test(textOf(c))))
+}
+// The colour of the first element child of the row that begins `<mark> <name>`.
+const markColor = (tree: unknown, name: string) => {
+  const rowNode = deepest(tree, new RegExp(`^\\S\\s*${name}`))
+  const mark = (rowNode?.children ?? []).find(c => typeof c !== 'string') as Node | undefined
+  return mark?.props?.color
+}
+const tokensOf = (bucket: Record<string, number>, role: string) => ({
+  role,
+  model: 'm',
+  session: 's',
+  tokens: { input: 0, cache_write: 0, cache_read: 0, output: 0, thinking: 0, ...bucket },
+})
+const inProgress = (id: string) => ({ id, title: 'a task', status: 'in_progress' })
+
+const toolUse = (tool: string, input: Record<string, unknown>, chars: number, i: number) => ({
+  tool_use_id: `tu-${i}`,
+  tool,
+  input,
+  text: 'x'.repeat(chars),
+})
+const withUses = (...uses: ReturnType<typeof toolUse>[]): SessionMessage[] => [
+  { role: 'assistant', text: '', toolUses: uses },
+]
 
 test('Without ratchet.toml the meter stays silent', async ($, on) => {
   const r = rig(on, { files: [] })
@@ -212,6 +310,7 @@ test('Without ratchet.toml the meter stays silent', async ($, on) => {
   expect(r.statuses).toEqual([])
   expect(r.toasts).toEqual([])
   expect(r.commands).toEqual([])
+  expect(r.runs).toEqual([])
   // Control: the rig does see an opted-in session, so the silence above is the module's.
   r.files = ['/work/repo/ratchet.toml']
   await start($, '/work/repo')
@@ -275,6 +374,25 @@ test('A million-token window is written in M', async ($, on) => {
   expect(last(r)).toBe('ctx ███░░░░░░░ 25% · 250k/1M')
 })
 
+test('Counts that round to a thousand k are written in M', async ($, on) => {
+  const r = rig(on)
+  await start($)
+  await measure($, r, 999600, 50, 2000000)
+  expect(last(r)).toBe('ctx █████░░░░░ 50% · 1M/2M')
+  await measure($, r, 1040000, 52, 2000000)
+  expect(last(r)).toBe('ctx █████░░░░░ 52% · 1M/2M +40k')
+})
+
+test("Each turn's move follows the fill", async ($, on) => {
+  const r = rig(on)
+  await start($)
+  await measure($, r, 84000, 42)
+  await measure($, r, 96000, 48)
+  expect(last(r)).toBe('ctx █████░░░░░ 48% · 96k/200k +12k')
+  await measure($, r, 66000, 33)
+  expect(last(r)).toBe('ctx ███░░░░░░░ 33% · 66k/200k -30k')
+})
+
 test('Each threshold toasts once, and a drop re-arms it', async ($, on) => {
   const r = rig(on)
   await start($)
@@ -291,11 +409,35 @@ test('Each threshold toasts once, and a drop re-arms it', async ($, on) => {
 
 test("A running subagent's requests tail the status line", async ($, on) => {
   const r = rig(on)
-  r.agents = [AGENT1]
+  r.agents = [IMPLEMENTER]
   await start($)
   await measure($, r, 84000, 42)
   await request($, 'agent-1')
-  expect(last(r)).toBe(`${MAIN} · 1 agent (max 50k)`)
+  expect(last(r)).toBe(`${MAIN} │ implementer █░░░░ 25%`)
+})
+
+test('Past three running subagents the tail counts the rest', async ($, on) => {
+  const r = rig(on)
+  r.agents = [
+    { ...AGENT1, id: 'agent-1', type: 'ratchet:reader' },
+    { ...AGENT1, id: 'agent-2', type: 'Explore' },
+    { ...AGENT1, id: 'agent-3', type: 'ratchet:implementer' },
+    { ...AGENT1, id: 'agent-4', type: 'general-purpose' },
+  ]
+  await start($)
+  await measure($, r, 84000, 42)
+  for (const [id, tokens] of [
+    ['agent-1', 20000],
+    ['agent-2', 60000],
+    ['agent-3', 160000],
+    ['agent-4', 100000],
+  ] as const) {
+    r.stepTokens = tokens
+    await request($, id)
+  }
+  expect(last(r)).toBe(
+    `${MAIN} │ implementer ████░ 80% · general-purpose ███░░ 50% · Explore ██░░░ 30% +1`,
+  )
 })
 
 test('A finished subagent leaves the status line', async ($, on) => {
@@ -305,6 +447,48 @@ test('A finished subagent leaves the status line', async ($, on) => {
   await measure($, r, 84000, 42)
   await request($, 'agent-1')
   expect(last(r)).toBe(MAIN)
+})
+
+test('The agent just updated is kept when twenty share its time', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.agents = Array.from({ length: 21 }, (_, i) => ({
+    ...AGENT1,
+    id: `agent-${i + 1}`,
+    description: `job <${i + 1}>`,
+  }))
+  await start($)
+  r.stepTokens = 1000
+  for (let i = 1; i <= 21; i++) await request($, `agent-${i}`)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    const listed = [...textOf(await ui.drawn()).matchAll(/job <(\d+)>/g)].map(m => m[1])
+    expect(new Set(listed).size).toBe(20)
+    expect(listed).toContain('21')
+    await ui.unmount()
+  }
+})
+
+test('/clear forgets the subagents and the trend', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.agents = [AGENT1]
+  await start($)
+  await request($, 'agent-1')
+  await measure($, r, 40000, 20)
+  await measure($, r, 50000, 25)
+  // Control: before the end the pane has both.
+  const before = await mountPane($, 'terminal')
+  expect(await before.find({ text: /Subagents/ })).toBeDefined()
+  expect(await before.find({ text: /Trend/ })).toBeDefined()
+  await before.unmount()
+  await endSession($, 'clear')
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /Subagents/ })).toBeUndefined()
+    expect(await ui.find({ text: /Trend/ })).toBeUndefined()
+    await ui.unmount()
+  }
 })
 
 test('The pane draws the breakdown on every surface', async ($, on) => {
@@ -325,6 +509,33 @@ test('The pane draws the breakdown on every surface', async ($, on) => {
   for (const c of asked) expect((c as { breakdown?: string }).breakdown).toBe('summary')
 })
 
+test('The pane colours the breakdown in the Celestial palette', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = {
+    ...BREAKDOWN,
+    categories: [
+      cat('System prompt', 6000, 'used'),
+      cat('Messages', 144000, 'used'),
+      cat('Autocompact buffer', 33000, 'buffer'),
+      cat('Free space', 17000, 'free'),
+    ],
+    totalTokens: 150000,
+    percentage: 75,
+  }
+  await start($)
+  await measure($, r, 150000, 75)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    const tree = await ui.drawn()
+    expect(deepest(tree, /75%/)?.props?.color).toBe('#FAB795')
+    expect(markColor(tree, 'System prompt')).toBe('#26BBD9')
+    expect(markColor(tree, 'Messages')).toBe('#B877DB')
+    expect(markColor(tree, 'Autocompact buffer')).toBe('#6C6F93')
+    expect(markColor(tree, 'Free space')).toBe('#6C6F93')
+    await ui.unmount()
+  }
+})
+
 const row = (mark: string) =>
   new RegExp(`${mark}\\s*ratchet:reader[\\s\\S]*Read the big file`)
 
@@ -338,7 +549,7 @@ test('The pane lists subagents with their fill', async ($, on) => {
     const ui = await mountPane($, surface)
     expect(await ui.find({ text: row('●') })).toBeDefined()
     const bar = barProps(await ui.drawn(), /25% · 50k\/200k · 1 req$/)
-    expect(bar?.color).toBe('success')
+    expect(bar?.color).toBe('#29D398')
     expect(bar?.dimColor).toBeFalsy()
     await ui.unmount()
   }
@@ -360,7 +571,7 @@ test('A finished subagent stays in the pane', async ($, on) => {
   }
 })
 
-test('A subagent past most of its window is drawn in the error colour with its peak', async ($, on) => {
+test('A subagent past most of its window is drawn in the hot colour with its peak', async ($, on) => {
   const r = rig(on)
   r.breakdown = BREAKDOWN
   r.agents = [AGENT1]
@@ -372,8 +583,185 @@ test('A subagent past most of its window is drawn in the error colour with its p
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
     const bar = barProps(await ui.drawn(), /88% · 175k\/200k · 2 req · peak 180k$/)
-    expect(bar?.color).toBe('error')
+    expect(bar?.color).toBe('#E95678')
     expect(bar?.dimColor).toBeFalsy()
+    await ui.unmount()
+  }
+})
+
+const withAutoCompact = BREAKDOWN
+
+test('The pane draws the trend and the turns left', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = withAutoCompact
+  await start($)
+  for (const t of [40000, 50000, 60000, 70000]) await measure($, r, t, t / 2000)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /Trend/ })).toBeDefined()
+    expect(await ui.find({ text: /▂▃▃▃\s*\+10k/ })).toBeDefined()
+    expect(await ui.find({ text: /~10 turns to auto-compact at this pace/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('A shrunk window restarts the pace', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = withAutoCompact
+  await start($)
+  for (const t of [100000, 150000, 60000, 70000]) await measure($, r, t, t / 2000)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /~10 turns to auto-compact at this pace/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('A flat window is not growing', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = withAutoCompact
+  await start($)
+  for (const t of [60000, 60000]) await measure($, r, t, t / 2000)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /Trend/ })).toBeDefined()
+    expect(await ui.find({ text: /not growing/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('The pane names the heaviest tool results', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.messages = withUses(
+    toolUse('Read', { file_path: '/repo/crates/ratchet/src/usage/transcript.rs' }, 40000, 1),
+    toolUse('Bash', { command: 'cargo test --workspace' }, 8000, 2),
+    toolUse('Grep', { pattern: 'fn parse' }, 400, 3),
+  )
+  await start($)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    const text = textOf(await ui.drawn())
+    expect(text).toMatch(
+      /Top consumers[\s\S]*Read[\s\S]*10k[\s\S]*src\/usage\/transcript\.rs[\s\S]*Bash[\s\S]*2k[\s\S]*cargo test --workspace[\s\S]*Grep[\s\S]*100[\s\S]*fn parse/,
+    )
+    expect(await ui.find({ text: /→ reads this size can go to ratchet:reader/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('Only the five heaviest tool results are listed', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.messages = withUses(
+    ...[600, 500, 400, 300, 200, 100].map((chars, i) => toolUse('Grep', { pattern: `p${i + 1}` }, chars, i)),
+  )
+  await start($)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    const text = textOf(await ui.drawn())
+    for (const p of ['p1', 'p2', 'p3', 'p4', 'p5']) expect(text).toMatch(new RegExp(`\\b${p}\\b`))
+    expect(text).not.toMatch(/\bp6\b/)
+    await ui.unmount()
+  }
+})
+
+test('A read under 5k tokens brings no reader hint', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.messages = withUses(toolUse('Read', { file_path: '/work/repo/README.md' }, 4000, 1))
+  await start($)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    const text = textOf(await ui.drawn())
+    expect(text).toMatch(/Read[\s\S]*1k[\s\S]*work\/repo\/README\.md/)
+    expect(text).not.toMatch(/ratchet:reader/)
+    await ui.unmount()
+  }
+})
+
+const T99 = {
+  tasks: [
+    {
+      id: 'T-0099',
+      buckets: [
+        tokensOf({ input: 10000, cache_write: 5000, cache_read: 40000, output: 4000, thinking: 1000 }, 'implementer'),
+        tokensOf({ input: 1000 }, 'implementer'),
+        tokensOf({ input: 20000, output: 10000, thinking: 3000 }, 'orchestrator'),
+        tokensOf({ cache_read: 9000, output: 1000 }, 'ratchet:reviewer'),
+      ],
+    },
+  ],
+}
+
+test('The pane shows what the held task has cost by role', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.tasks = [{ id: 'T-0001', title: 'done', status: 'done' }, inProgress('T-0099')]
+  r.usageJson = T99
+  await start($)
+  await ctxCommand($)
+  const bin = `${r.root}/bin/ratchet`
+  expect(r.runs).toContainEqual([bin, 'task', 'list', '--mine', '--json', '--session', 'sess-1'])
+  expect(r.runs).toContainEqual([bin, 'usage', 'T-0099', '--json'])
+  for (const argv of r.runs) expect(argv[0]).toBe(bin)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /T-0099\s*·\s*100k tokens so far/ })).toBeDefined()
+    expect(await ui.find({ text: /implementer 60% · orchestrator 30% · reviewer 10%/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('On Windows the binary is ratchet.exe', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.tasks = [inProgress('T-0099')]
+  r.usageJson = T99
+  r.windows = true
+  await start($)
+  await ctxCommand($)
+  const exe = `${r.root}/bin/ratchet.exe`
+  expect(r.runs.length).toBeGreaterThan(0)
+  for (const argv of r.runs) expect(argv[0]).toBe(exe)
+})
+
+test('Without a held task the pane shows no task cost', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.tasks = [
+    { id: 'T-0001', title: 'queued', status: 'todo' },
+    { id: 'T-0002', title: 'in review', status: 'review' },
+  ]
+  r.usageJson = T99
+  await start($)
+  await ctxCommand($)
+  // Control: the module did ask the board.
+  expect(r.runs.some(argv => argv.includes('list'))).toBe(true)
+  expect(r.runs.some(argv => argv.includes('usage'))).toBe(false)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /tokens so far/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('A failed refresh keeps the last figures', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.tasks = [inProgress('T-0099')]
+  r.usageJson = { tasks: [{ id: 'T-0099', buckets: [tokensOf({ input: 100000 }, 'implementer')] }] }
+  await start($)
+  await ctxCommand($)
+  const first = await mountPane($, 'terminal')
+  expect(await first.find({ text: /T-0099\s*·\s*100k tokens so far/ })).toBeDefined()
+  await first.unmount()
+  r.usageExit = 1
+  await ctxCommand($)
+  expect(r.runs.filter(argv => argv.includes('usage')).length).toBeGreaterThan(1)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /T-0099\s*·\s*100k tokens so far/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -411,4 +799,37 @@ test('A failing reading never fails a model request', async ($, on) => {
       model: 'claude-sonnet-5-5',
     },
   })
+})
+
+test('A failing agent list leaves the line without its tail', async ($, on) => {
+  const r = rig(on)
+  r.agents = [AGENT1]
+  await start($)
+  // Control: with a working list a running subagent's request does tail the line.
+  await measure($, r, 84000, 42)
+  await request($, 'agent-1')
+  expect(last(r)).toContain('│')
+  r.agentsFail = true
+  await measure($, r, 84000, 42)
+  expect(last(r)).toBe(MAIN)
+})
+
+test('A failing command registration still meters the session', async ($, on) => {
+  const r = rig(on)
+  r.registerFails = true
+  r.usage = { tokens: 84000, percent: 42, window: WINDOW }
+  await start($)
+  expect(last(r)).toBe(MAIN)
+})
+
+test('A failing read still draws the pane', async ($, on) => {
+  const r = rig(on)
+  r.breakdown = BREAKDOWN
+  r.usageFails = true
+  await start($)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /No breakdown yet/ })).toBeDefined()
+    await ui.unmount()
+  }
 })
