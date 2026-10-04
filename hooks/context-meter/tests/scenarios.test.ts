@@ -27,7 +27,6 @@ type Rig = {
   usageJson: unknown
   usageExit: number
   runs: string[][]
-  root: string
   windows: boolean
 }
 
@@ -55,13 +54,11 @@ function rig(on: On, o: { files?: string[]; dirs?: string[] } = {}): Rig {
     usageJson: { tasks: [] },
     usageExit: 0,
     runs: [],
-    root: '',
     windows: false,
   }
   mock.clock(on)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('fs.stat', (_$, e) => {
-    r.root = _$.plugin.root
     if (r.windows && e.path.endsWith('/bin/ratchet.exe')) return { value: fileStat }
     if (r.files.includes(e.path)) return { value: fileStat }
     if (r.dirs.includes(e.path)) return { value: dirStat }
@@ -90,7 +87,6 @@ function rig(on: On, o: { files?: string[]; dirs?: string[] } = {}): Rig {
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('process.run', (_$, e) => {
-    r.root = _$.plugin.root
     r.runs.push([...e.argv])
     const done = (exitCode: number, stdout: string) => ({
       value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
@@ -243,6 +239,11 @@ const AGENT1: Agent = {
 const IMPLEMENTER: Agent = { ...AGENT1, type: 'ratchet:implementer' }
 
 declare const setTimeout: (fn: () => void, ms: number) => unknown
+// The plugin under test is the repo root; the mocks' own `$.plugin.root` is a temporary test plugin.
+const ROOT = decodeURIComponent(new URL('../../../', (import.meta as unknown as { url: string }).url).pathname).replace(/\/$/, '')
+const norm = (path: string | undefined) =>
+  (path ?? '').replace(/\\/g, '/').replace(/^\/(?=[A-Za-z]:)/, '').toLowerCase()
+const argvNorm = (argv: string[]) => [norm(argv[0]), ...argv.slice(1)]
 const settle = () => new Promise<void>(done => setTimeout(done, 25))
 
 const ctxCommand = async ($: Engine) => {
@@ -701,10 +702,11 @@ test('The pane shows what the held task has cost by role', async ($, on) => {
   r.usageJson = T99
   await start($)
   await ctxCommand($)
-  const bin = `${r.root}/bin/ratchet`
-  expect(r.runs).toContainEqual([bin, 'task', 'list', '--mine', '--json', '--session', 'sess-1'])
-  expect(r.runs).toContainEqual([bin, 'usage', 'T-0099', '--json'])
-  for (const argv of r.runs) expect(argv[0]).toBe(bin)
+  const bin = norm(`${ROOT}/bin/ratchet`)
+  const runs = r.runs.map(argvNorm)
+  expect(runs).toContainEqual([bin, 'task', 'list', '--mine', '--json', '--session', 'sess-1'])
+  expect(runs).toContainEqual([bin, 'usage', 'T-0099', '--json'])
+  for (const argv of runs) expect(argv[0]).toBe(bin)
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
     expect(await ui.find({ text: /T-0099\s*·\s*100k tokens so far/ })).toBeDefined()
@@ -721,9 +723,9 @@ test('On Windows the binary is ratchet.exe', async ($, on) => {
   r.windows = true
   await start($)
   await ctxCommand($)
-  const exe = `${r.root}/bin/ratchet.exe`
+  const exe = norm(`${ROOT}/bin/ratchet.exe`)
   expect(r.runs.length).toBeGreaterThan(0)
-  for (const argv of r.runs) expect(argv[0]).toBe(exe)
+  for (const argv of r.runs) expect(norm(argv[0])).toBe(exe)
 })
 
 test('Without a held task the pane shows no task cost', async ($, on) => {
