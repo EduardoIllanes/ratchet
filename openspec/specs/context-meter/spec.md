@@ -198,7 +198,7 @@ description SHALL be captured from that list when a reading is recorded and kept
 
 ### Requirement: The pane draws the main window's trend toward auto-compaction
 With two or more entries in the history, the pane SHALL draw, under a `Trend` heading, a
-sparkline of the most recent entries the pane's width holds — one block per entry from
+sparkline of as many of the most recent entries as fit on its line beside the move — one block per entry from
 `▁▂▃▄▅▆▇█`, the one at index `min(7, floor(tokens / window × 8))` — in the fill colour of the
 breakdown's percentage, followed by the status line's move (` +<tokens>` or ` -<tokens>`, none
 when the last two entries are equal). When auto-compaction is on and its threshold is known, it
@@ -222,15 +222,19 @@ is at or past the threshold, `not growing` when the pace is not above zero, and 
 - **THEN** it shows a `Trend` heading and `not growing`
 
 ### Requirement: The pane names the heaviest tool results
-The pane SHALL read `$.session.messages()` and, under a `Top consumers` heading, list the five
-tool uses whose answered `text` is longest, largest first: the tool's name, an estimate of
-`ceil(length / 4)` tokens written as the status line writes tokens, and a label. The label is
+The pane SHALL read `$.session.messages({ as: 'api' })` — the messages the next request is built
+from, so a result a compaction replaced is not among them — pair each `tool_use` block of an
+assistant message with the `tool_result` block of a user message whose `tool_use_id` is its
+`id`, and take as the result's text its `content` when that is a string, else the `text` of its
+`text` blocks joined. Under a `Top consumers` heading it SHALL list the five results whose text
+is longest, largest first: the `tool_use`'s `name`, an estimate of `ceil(length / 4)` tokens
+written as the status line writes tokens, and a label from the `tool_use`'s `input`. The label is
 the last three segments, split on `/` or `\`, of the input's `file_path`, `notebook_path` or
 `path`; else the first line of its `command`, cut to 47 characters followed by `…` when longer
 than 48; else its `pattern`, `url`, `description`, `subagent_type` or `query`, the first that is
 a string. When a `Read` among the five is estimated at 5000 tokens or more, the pane SHALL add
-the line `→ reads this size can go to ratchet:reader`. With no answered tool use there SHALL be
-no such section.
+the line `→ reads this size can go to ratchet:reader`. With no answered tool use in those
+messages there SHALL be no such section.
 
 #### Scenario: The pane names the heaviest tool results
 - **WHEN** the session's messages hold a `Read` of `/repo/crates/ratchet/src/usage/transcript.rs` answered with 40000 characters, a `Bash` of `cargo test --workspace` answered with 8000, and a `Grep` for `fn parse` answered with 400, and the pane is drawn
@@ -249,11 +253,16 @@ In an opted-in session the module SHALL read the held task's tokens on `session.
 60 seconds after it, and on `/ctx`, without any hook waiting for it: it SHALL run the plugin's
 own binary — `<$.plugin.root>/bin/ratchet.exe` when `$.fs.stat` resolves it with `kind: 'file'`,
 else `<$.plugin.root>/bin/ratchet` — as `task list --mine --json --session <$.session.id()>`,
-take the first task whose `status` is `in_progress`, and run `usage <id> --json`. The task's
+take the first task whose `status` is `in_progress`, and run `usage <id> --json`. Both commands
+print through ratchet's output discipline, which caps stdout even when it is piped: past 60
+lines it prints the first 20 and then the line `… (<n> lines in <path>)`. When the last line of
+stdout has that form the module SHALL read the whole output from `<path>` with `$.fs.read` and
+parse that instead. The task's
 figures are its `buckets` summed by `role` over `input`, `cache_write`, `cache_read` and
 `output` (thinking is inside output), roles ordered by tokens, largest first; they are tokens,
-not dollars. With no held task the figures SHALL be cleared; a run that rejects, exits non-zero
-or prints what does not parse SHALL leave the last figures as they were.
+not dollars. With no held task the figures SHALL be cleared; a run that rejects, exits non-zero,
+prints what does not parse or reports nothing for the task SHALL leave the last figures as they
+were.
 
 When figures with more than zero tokens are held, the pane SHALL draw, in `#B877DB`, the task's
 id followed by `· <total> tokens so far`; a bar across the pane's width split among the roles in
@@ -273,6 +282,10 @@ including the first `:` dropped and `percent = round(tokens / total × 100)`.
 - **WHEN** `task list --mine --json` lists only tasks whose status is not `in_progress`, and `/ctx` opens the pane
 - **THEN** the module does not run `usage`, and the pane shows no `tokens so far` line
 
+#### Scenario: A long report is read from the file its last line names
+- **WHEN** the session holds `T-0099`, and `usage T-0099 --json` prints the first 20 lines of a 70-line report followed by `… (70 lines in /home/u/.ratchet/out/20261004T143413-usage-T-0099.txt)`, that file holding the whole report with buckets `implementer` of 60000 tokens, `orchestrator` of 30000 and `ratchet:reviewer` of 10000, and `/ctx` opens the pane
+- **THEN** the pane shows `T-0099` with `100k tokens so far` and the legend `implementer 60% · orchestrator 30% · reviewer 10%`
+
 #### Scenario: A failed refresh keeps the last figures
 - **WHEN** the figures of `T-0099` were read once with 100000 tokens, and on the next `/ctx` `usage T-0099 --json` exits 1
 - **THEN** the pane still shows `T-0099` with `100k tokens so far`
@@ -284,8 +297,9 @@ included when `$.command.register` or a state update rejects. When `$.agent.list
 status line SHALL be pinned without its subagent tail, a subagent's request SHALL still be
 recorded (its type and description left as they were, `agent` and empty for a new one), and the
 pane SHALL draw every agent as not running. When `$.session.usage()` rejects while the pane
-draws, the pane SHALL say `No breakdown yet`; when `$.session.messages()` rejects, the pane
-SHALL draw no top consumers.
+draws, or anything else fails while it draws, the pane SHALL say `No breakdown yet`; when
+`$.session.messages()` rejects, the pane SHALL draw the rest without top consumers. A failure
+recording the history SHALL NOT keep a measurement from refreshing the status line.
 
 #### Scenario: A failing reading never fails a model request
 - **WHEN** a main-loop request resolves while `$.session.usage()` rejects
@@ -302,3 +316,11 @@ SHALL draw no top consumers.
 #### Scenario: A failing read still draws the pane
 - **WHEN** the pane is drawn while `$.session.usage()` rejects
 - **THEN** it shows `No breakdown yet`
+
+#### Scenario: A failing agent list still records a subagent's request
+- **WHEN** `$.agent.list()` rejects while a request of subagent `agent-1` resolves with 50000 tokens, and the pane is then drawn with a 200000-token session window
+- **THEN** it shows `○ agent` and a dim bar line reading `25% · 50k/200k · 1 req`
+
+#### Scenario: A failing messages read draws the pane without top consumers
+- **WHEN** `$.session.messages()` rejects and the pane is drawn over a breakdown of 86000 of 200000 tokens (43%)
+- **THEN** it shows `43% · 86k / 200k` and no `Top consumers` heading
