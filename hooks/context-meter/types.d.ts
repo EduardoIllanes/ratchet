@@ -16,12 +16,22 @@ export type AgentReading = {
   description: string
 }
 
+/** What the task this session holds has cost so far, from `ratchet usage <id> --json`. */
+export type TaskCost = {
+  id: string
+  title: string
+  total: number
+  roles: { role: string; tokens: number }[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     ratchet: {
       contextReading: Reading | null
       contextAlerted: number
       contextAgents: Record<string, AgentReading>
+      contextHistory: number[]
+      contextTask: TaskCost | null
       contextMetered: boolean
     }
   }
