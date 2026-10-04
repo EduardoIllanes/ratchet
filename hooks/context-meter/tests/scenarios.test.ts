@@ -32,6 +32,9 @@ type Rig = {
   windows: boolean
 }
 
+/** A path with forward slashes and no drive letter, so the rig's POSIX paths match on Windows too. */
+const posix = (path: string) => path.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
+
 const fileStat = { kind: 'file', size: 1, mtimeMs: 0, isLink: false } as const
 const dirStat = { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } as const
 
@@ -62,9 +65,11 @@ function rig(on: On, o: { files?: string[]; dirs?: string[] } = {}): Rig {
   mock.clock(on)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('fs.stat', (_$, e) => {
-    if (r.windows && e.path.endsWith('/bin/ratchet.exe')) return { value: fileStat }
-    if (r.files.includes(e.path)) return { value: fileStat }
-    if (r.dirs.includes(e.path)) return { value: dirStat }
+    // On Windows the engine hands the path over in its own form (`C:\work\repo\…`).
+    const path = posix(e.path)
+    if (r.windows && path.endsWith('/bin/ratchet.exe')) return { value: fileStat }
+    if (r.files.includes(path)) return { value: fileStat }
+    if (r.dirs.includes(path)) return { value: dirStat }
     return { deny: 'ENOENT' }
   })
   on('command.register', (_$, e) => {
@@ -91,7 +96,7 @@ function rig(on: On, o: { files?: string[]; dirs?: string[] } = {}): Rig {
     r.messagesFail ? { deny: 'messages unavailable' } : { value: r.messages as never },
   )
   on('fs.read', (_$, e) => {
-    const text = r.reads[e.path]
+    const text = r.reads[posix(e.path)]
     return text === undefined ? { deny: 'ENOENT' } : { value: text }
   })
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
