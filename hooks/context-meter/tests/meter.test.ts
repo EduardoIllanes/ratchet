@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { agentsTail, bar, categoryColors, fillColor, lastDelta, pushHistory, shortType, sparkline, taskCost, topConsumers, turnsToCompact, cells, compact, inputTokens, reached, recordStep, statusLine } from '../meter'
+import { agentsTail, bar, cappedPath, categoryColors, fillColor, lastDelta, pushHistory, shortType, sparkline, taskCost, topConsumers, turnsToCompact, cells, compact, inputTokens, reached, recordStep, statusLine } from '../meter'
 
 const WINDOW = 200_000
 
@@ -98,8 +98,23 @@ describe('meter', () => {
   })
 
   test('ranks tool results and sums the held task by role', () => {
-    const use = (tool: string, input: Record<string, unknown>, chars: number) => ({ tool, input, text: 'x'.repeat(chars) })
-    const top = topConsumers([{ toolUses: [use('Grep', { pattern: 'p' }, 400), use('Read', { file_path: '/a/b/c/d.rs' }, 40_000)] }], 5)
+    const messages = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'g', name: 'Grep', input: { pattern: 'p' } },
+          { type: 'tool_use', id: 'r', name: 'Read', input: { file_path: '/a/b/c/d.rs' } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'g', content: 'x'.repeat(400) },
+          { type: 'tool_result', tool_use_id: 'r', content: [{ type: 'text', text: 'x'.repeat(40_000) }, { type: 'image' }] },
+        ],
+      },
+    ]
+    const top = topConsumers(messages, 5)
     expect(top).toEqual([
       { tool: 'Read', label: 'b/c/d.rs', tokens: 10_000 },
       { tool: 'Grep', label: 'p', tokens: 100 },
@@ -116,5 +131,10 @@ describe('meter', () => {
       ],
     })
     expect(taskCost({ tasks: [] }, 'T-1')).toBeNull()
+  })
+
+  test('finds the file a capped output names', () => {
+    expect(cappedPath('{}\n… (70 lines in /home/u/out/x.txt)\n')).toBe('/home/u/out/x.txt')
+    expect(cappedPath('[]')).toBeNull()
   })
 })
