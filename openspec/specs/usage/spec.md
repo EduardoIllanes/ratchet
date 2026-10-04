@@ -50,6 +50,33 @@ understood records SHALL add one to `skipped` and be reported once, never as an 
 - **WHEN** a session's transcript holds only `user` records
 - **THEN** the report exits 0 and counts that transcript once in `skipped`
 
+### Requirement: One API response counts once however many records it was written as
+Claude Code writes one transcript record per content block of a response (thinking, text, each
+`tool_use`); every one carries the response's `message.id`, and its `message.usage` repeats or,
+while the response streams, grows (`output_tokens` never decreases, the last record holding the
+final figures). Within one transcript the reader SHALL count every `assistant` record sharing a
+`message.id` as ONE call: its token classes those of the last record of the group that carries
+`message.usage`, its `tool_use` names and ids those of all the group's records in file order,
+its timestamp the group's first record's. A group where no record carries `message.usage`
+SHALL count as one `partial` call. An `assistant` record without `message.id` SHALL count as
+its own call, as before.
+
+#### Scenario: A response written as several records counts once
+- **WHEN** the session holds `T-0001` and its transcript holds three assistant records with `message.id` `msg-1`, each with usage input 10, cache read 1000 and output 50
+- **THEN** `ratchet usage T-0001` totals input 10, cache read 1000 and output 50
+
+#### Scenario: A response whose output grew while streaming counts its last record
+- **WHEN** the session holds `T-0001` and two assistant records with `message.id` `msg-2` carry output 5 and then output 120, with the same input
+- **THEN** `ratchet usage T-0001` totals output 120 and that input once
+
+#### Scenario: Records without a message id still count one by one
+- **WHEN** the session holds `T-0001` and two assistant records carry no `message.id`, each with usage input 10
+- **THEN** `ratchet usage T-0001` totals input 20
+
+#### Scenario: A response split across records ends orientation once
+- **WHEN** before any claim a session makes one call with input 10, then a response `msg-3` written as two records (a `text` block, then an `Agent` `tool_use`) each with usage input 7, and then two more calls before claiming `T-0001`
+- **THEN** orientation for that session equals input 17
+
 ### Requirement: A call belongs to the task its session held at that instant
 A session holds a task from the timestamp of its `task.claimed` event until the first
 `task.status` event whose new status is `done`, `blocked` or `ready`, or the session's

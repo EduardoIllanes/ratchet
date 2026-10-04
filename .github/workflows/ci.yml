@@ -31,6 +31,11 @@ jobs:
         run: cargo fmt --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: claude (the context-meter specs run `claude plugin test`)
+        run: npm install -g @anthropic-ai/claude-code@2.1.288
       - name: test (gate; latency excluded)
         run: cargo test -p ratchet -- --skip pre_tool_median_under_ceiling --skip agent_protocol__pre_tool_answers_fast
       - name: latency (report only)

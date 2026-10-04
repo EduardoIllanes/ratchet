@@ -1094,3 +1094,186 @@ fn usage__without_note_nothing_is_written() {
         "no event was written"
     );
 }
+
+// --- Requirement: One API response counts once however many records it was written as -------
+
+/// Appends one Claude Code-shaped assistant record (one content block of response `msg_id`, or of
+/// an id-less response when `msg_id` is `None`) to the session's transcript. Local to these
+/// scenarios: `TranscriptBuilder` has no message-id-aware writer and support.rs is not ours to edit.
+fn block_record(
+    tb: &TranscriptBuilder,
+    cwd: &std::path::Path,
+    session_id: &str,
+    ts: &str,
+    msg_id: Option<&str>,
+    u: &Usage,
+    block: Value,
+) {
+    use std::io::Write;
+    let slug: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let dir = tb.root.path().join(slug);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut message = serde_json::json!({
+        "model": "claude-sonnet-5-5",
+        "usage": {
+            "input_tokens": u.input,
+            "cache_creation_input_tokens": u.cache_write,
+            "cache_read_input_tokens": u.cache_read,
+            "output_tokens": u.output,
+        },
+        "content": [block],
+    });
+    if let Some(id) = msg_id {
+        message["id"] = serde_json::json!(id);
+    }
+    let rec = serde_json::json!({
+        "type": "assistant",
+        "timestamp": ts,
+        "sessionId": session_id,
+        "cwd": cwd.to_string_lossy(),
+        "version": "1.2.3",
+        "requestId": format!("req-{}", msg_id.unwrap_or("none")),
+        "message": message,
+    });
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("{session_id}.jsonl")))
+        .unwrap();
+    writeln!(f, "{rec}").unwrap();
+}
+
+fn text_block() -> Value {
+    serde_json::json!({ "type": "text", "text": "hello" })
+}
+
+#[test]
+fn usage__a_response_written_as_several_records_counts_once() {
+    let sb = board("s-40");
+    let id = new_task(&sb, "dedupe", &[], "s-40", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-40", 2)), 0);
+    let tb = TranscriptBuilder::new();
+    let blocks = [
+        serde_json::json!({ "type": "thinking", "thinking": "hm" }),
+        text_block(),
+        serde_json::json!({ "type": "tool_use", "id": "tu-9", "name": "Read", "input": {} }),
+    ];
+    for (i, b) in blocks.into_iter().enumerate() {
+        block_record(
+            &tb,
+            &sb.root(),
+            "s-40",
+            &at_secs(180 + i as i64),
+            Some("msg-1"),
+            &tokens(10, 0, 1000, 50),
+            b,
+        );
+    }
+
+    let out = usage(&sb, &tb, &[&id], &sb.root(), &[("RATCHET_NOW", &at(5))]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(contains_number(&text, "10"), "{text}");
+    assert!(contains_number(&text, "50"), "{text}");
+    assert!(text.contains("1.0k"), "cache read 1000 once: {text}");
+    assert!(!contains_number(&text, "30"), "input counted 3x: {text}");
+    assert!(!contains_number(&text, "150"), "output counted 3x: {text}");
+    assert!(!text.contains("3.0k"), "cache read counted 3x: {text}");
+}
+
+#[test]
+fn usage__a_response_whose_output_grew_while_streaming_counts_its_last_record() {
+    let sb = board("s-41");
+    let id = new_task(&sb, "streaming", &[], "s-41", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-41", 2)), 0);
+    let tb = TranscriptBuilder::new();
+    block_record(
+        &tb,
+        &sb.root(),
+        "s-41",
+        &at_secs(180),
+        Some("msg-2"),
+        &tokens(10, 0, 0, 5),
+        text_block(),
+    );
+    block_record(
+        &tb,
+        &sb.root(),
+        "s-41",
+        &at_secs(181),
+        Some("msg-2"),
+        &tokens(10, 0, 0, 120),
+        text_block(),
+    );
+
+    let out = usage(&sb, &tb, &[&id], &sb.root(), &[("RATCHET_NOW", &at(5))]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(contains_number(&text, "120"), "{text}");
+    assert!(contains_number(&text, "10"), "{text}");
+    assert!(!contains_number(&text, "125"), "output summed: {text}");
+    assert!(!contains_number(&text, "20"), "input counted twice: {text}");
+}
+
+#[test]
+fn usage__records_without_a_message_id_still_count_one_by_one() {
+    // Describes today's behaviour: expected to pass before the change as well as after it.
+    let sb = board("s-42");
+    let id = new_task(&sb, "no ids", &[], "s-42", 1);
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-42", 2)), 0);
+    let tb = TranscriptBuilder::new();
+    for i in 0..2 {
+        block_record(
+            &tb,
+            &sb.root(),
+            "s-42",
+            &at_secs(180 + i),
+            None,
+            &tokens(10, 0, 0, 1),
+            text_block(),
+        );
+    }
+
+    let out = usage(&sb, &tb, &[&id], &sb.root(), &[("RATCHET_NOW", &at(5))]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(contains_number(&text, "20"), "{text}");
+}
+
+#[test]
+fn usage__a_response_split_across_records_ends_orientation_once() {
+    let sb = board("s-43");
+    let id = new_task(&sb, "orientation dedupe", &[], "s-43", 1);
+    let tb = TranscriptBuilder::new();
+    let root = sb.root();
+    let ids = [None, Some("msg-3"), Some("msg-3"), None, None];
+    let inputs = [10u64, 7, 7, 90, 90];
+    for (i, (mid, input)) in ids.iter().zip(inputs).enumerate() {
+        let block = if i == 2 {
+            serde_json::json!({ "type": "tool_use", "id": "tu-1", "name": "Agent", "input": {} })
+        } else {
+            text_block()
+        };
+        block_record(
+            &tb,
+            &root,
+            "s-43",
+            &at_secs(120 + i as i64),
+            *mid,
+            &tokens(input, 0, 0, 3),
+            block,
+        );
+    }
+    assert_eq!(code(&task(&sb, &["claim", &id], "s-43", 4)), 0);
+
+    let out = usage(&sb, &tb, &[&id], &root, &[("RATCHET_NOW", &at(8))]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("orientation"), "{text}");
+    assert!(contains_number(&text, "17"), "{text}");
+    assert!(!contains_number(&text, "24"), "msg-3 counted twice: {text}");
+}

@@ -20,6 +20,12 @@ reviewer). Everything is enforced by hooks and one small binary, not by prompt t
   handoff, orphaned tasks, and up to five ready to take. One line per prompt after that.
 - **Local PDF extraction** (`ratchet pdf`) through the `liteparse` CLI, with automatic OCR
   retry and output kept out of the terminal.
+- **A context meter.** In a repo that opted in, the status line shows how full the main context
+  window is, a toast fires at 70% and 85%, and `/ctx` opens a pane with the breakdown by
+  category and every subagent's window, the main window's trend with a forecast of the turns
+  left before auto-compaction, the heaviest tool results, and the held task's tokens by role. It
+  is a function-hook module: it needs a Claude Code with function-hook modules and is tested
+  against 2.1.288.
 - **Agent roles, skills and commands.** Seven agent profiles, the `ratchet-tasks` and
   `ratchet-pdf` skills, the `/opsx:*` OpenSpec commands, `/ratchet:init` and `/ratchet:map`.
 
@@ -377,6 +383,15 @@ web-fetch flow (approval lists, robots.txt, cache) that the original group 3 pla
 ported is deliberately not planned for `ratchet` — it stays in `ops`.
 
 ## Status
+
+v0.2.3 — a context meter, in repos that opted in: the status line shows how full the main
+context window is, its move since the last turn and a small bar per running subagent; a toast
+fires at 70% and 85%; and `/ctx` opens a pane with the breakdown by category, the trend with a
+forecast of the turns left before auto-compaction, the heaviest tool results still in the window,
+the held task's tokens by role and every subagent's window. It is a function-hook module tested
+against Claude Code 2.1.288. Also `ratchet usage` no longer double counts: Claude Code writes one
+transcript record per content block of a response, each repeating its usage, and every record was
+summed (totals were roughly twice the real ones); a response now counts once, by `message.id`.
 
 v0.2.2 — `ratchet config init` also appends to the repo's `CLAUDE.md` a block saying when
 dispatching the `reader` and `researcher` agents pays off and when it does not (idempotent, never
